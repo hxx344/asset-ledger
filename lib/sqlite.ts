@@ -1,4 +1,4 @@
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, backup } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -56,6 +56,10 @@ export function openDatabase(filename: string, migrations = resolve('drizzle')) 
       } catch (error) { connection.exec('ROLLBACK'); throw error; }
     },
     close: () => connection.close(),
+    async backup(destination: string) {
+      mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
+      await backup(connection, destination);
+    },
   };
 }
 

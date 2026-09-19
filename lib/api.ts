@@ -4,17 +4,25 @@ export function sameOrigin(request: Request) {
   const expected=process.env.PUBLIC_ORIGIN || (new URL(request.url).protocol+'//'+request.headers.get('host'));
   if(!origin || origin!==expected || request.headers.get('sec-fetch-site')==='cross-site')throw new Error('ORIGIN_REJECTED');
 }
-export async function apiOwner(request:Request,mutation=false){
+export async function apiOwner(request:Request,mutation=false,maxBytes=8192){
   const owner=await currentOwner();
   if(!owner)throw new Error('AUTH_REQUIRED');
   if(mutation){
     sameOrigin(request);
     if(!request.headers.get('content-type')?.startsWith('application/json'))throw new Error('请使用 JSON 请求');
-    if(Number(request.headers.get('content-length')??0)>8192)throw new Error('请求内容过大');
+    if(Number(request.headers.get('content-length')??0)>maxBytes)throw new Error('请求内容过大');
   }
   return owner;
 }
-export async function jsonBody(request:Request){const text=await request.text();if(text.length>8192)throw new Error('请求内容过大');return JSON.parse(text);}
+export async function jsonBody(request:Request,maxBytes=8192){
+  const reader=request.body?.getReader();
+  if(!reader)throw new Error('请求内容为空');
+  const chunks:Uint8Array[]=[];let size=0;
+  try{
+    for(;;){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>maxBytes){await reader.cancel();throw new Error('请求内容过大');}chunks.push(value);}
+  }finally{reader.releaseLock();}
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
 export const json=(data:unknown,status=200)=>Response.json(data,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
 export function failure(error:unknown){
   const message=error instanceof Error?error.message:'请求失败，请稍后重试';

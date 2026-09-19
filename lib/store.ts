@@ -24,7 +24,7 @@ export async function getLedger(owner:string):Promise<Ledger>{
     db().prepare('SELECT data FROM assets WHERE owner = ?').bind(owner).all<{data:string}>(),
     db().prepare('SELECT key,value FROM settings WHERE owner = ?').bind(owner).all<{key:string,value:string}>(),
     db().prepare('SELECT exchange FROM connections WHERE owner = ?').bind(owner).all<{exchange:string}>(),
-    db().prepare('SELECT data FROM snapshots WHERE owner = ? ORDER BY date DESC LIMIT 730').bind(owner).all<{data:string}>(),
+    db().prepare("SELECT data FROM snapshots WHERE owner = ? ORDER BY json_extract(data, '$.date') DESC LIMIT 730").bind(owner).all<{data:string}>(),
   ]);
   const source=settings.results.find(s=>s.key==='source-ledger');
   const ledger=seedLedger(source?JSON.parse(source.value):readSource());
@@ -46,12 +46,12 @@ async function snapshot(owner:string){
   const data={id:'daily-'+date,date,total,fx:ledger.fx,cny:total*ledger.fx,future:false,difference:0,partial,updatedAt:new Date().toISOString(),assets:ledger.assets};
   await db().prepare('INSERT INTO snapshots(owner,date,data) VALUES(?,?,?) ON CONFLICT(owner,date) DO UPDATE SET data=excluded.data').bind(owner,date,JSON.stringify(data)).run();
 }
-async function lock(owner:string){
+export async function lock(owner:string){
   const now=Date.now();
   const result=await db().prepare('INSERT INTO sync_locks(owner,expires) VALUES(?,?) ON CONFLICT(owner) DO UPDATE SET expires=excluded.expires WHERE sync_locks.expires < ?').bind(owner,now+120000,now).run();
   if(!result.meta.changes)throw new Error('资产正在更新，请稍后重试');
 }
-async function unlock(owner:string){await db().prepare('DELETE FROM sync_locks WHERE owner = ?').bind(owner).run();}
+export async function unlock(owner:string){await db().prepare('DELETE FROM sync_locks WHERE owner = ?').bind(owner).run();}
 export async function editAsset(owner:string,input:{id:string,quantity:number,price:number|null}){
   await lock(owner);
   try{

@@ -39,7 +39,7 @@ case "$(uname -m)" in x86_64) NODE_ARCH=x64 ;; aarch64|arm64) NODE_ARCH=arm64 ;;
 if [[ -n $DATA_FILE ]]; then
   [[ -f $DATA_FILE ]] || die '导入文件不存在。'
   DATA_FILE=$(realpath -- "$DATA_FILE")
-  [[ ! -f $DATA_DIR/ledger.sqlite ]] || die '已有数据库，拒绝用导入文件覆盖现有资产。'
+  [[ ! -f $DATA_DIR/ledger.sqlite ]] || die '已有数据库，请去掉 --data-file 升级，再在账本页面点击「导入原表数据」选择原表 JSON 文件。'
 fi
 install -d -m 0755 "$APP_ROOT"
 exec 9>"$APP_ROOT/install.lock"
