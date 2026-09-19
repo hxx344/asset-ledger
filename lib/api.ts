@@ -1,14 +1,18 @@
-import { getChatGPTUser } from '@/app/chatgpt-auth';
+import { currentOwner } from './auth';
+export function sameOrigin(request: Request) {
+  const origin=request.headers.get('origin');
+  const expected=process.env.PUBLIC_ORIGIN || (new URL(request.url).protocol+'//'+request.headers.get('host'));
+  if(!origin || origin!==expected || request.headers.get('sec-fetch-site')==='cross-site')throw new Error('ORIGIN_REJECTED');
+}
 export async function apiOwner(request:Request,mutation=false){
-  const user=await getChatGPTUser();
-  if(!user)throw new Error('AUTH_REQUIRED');
+  const owner=await currentOwner();
+  if(!owner)throw new Error('AUTH_REQUIRED');
   if(mutation){
-    const origin=request.headers.get('origin');
-    if(!origin || origin!==new URL(request.url).origin || request.headers.get('sec-fetch-site')==='cross-site')throw new Error('ORIGIN_REJECTED');
+    sameOrigin(request);
     if(!request.headers.get('content-type')?.startsWith('application/json'))throw new Error('请使用 JSON 请求');
     if(Number(request.headers.get('content-length')??0)>8192)throw new Error('请求内容过大');
   }
-  return user.userId;
+  return owner;
 }
 export async function jsonBody(request:Request){const text=await request.text();if(text.length>8192)throw new Error('请求内容过大');return JSON.parse(text);}
 export const json=(data:unknown,status=200)=>Response.json(data,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});

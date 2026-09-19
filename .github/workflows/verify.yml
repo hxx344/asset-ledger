@@ -1,0 +1,37 @@
+name: Verify self-hosted deployment
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  application:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.15.0
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - run: npm run test:smoke
+      - run: bash -n install.sh
+  installer:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install, upgrade and recover a failed upgrade
+        run: sudo bash tests/install-integration.sh
+      - name: Service logs on failure
+        if: failure()
+        run: sudo journalctl -u asset-ledger --no-pager -n 100

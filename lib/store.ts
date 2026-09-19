@@ -1,19 +1,20 @@
-import { env } from 'cloudflare:workers';
-import { seedLedger } from './seed';
+import { seedLedger, readSource } from './seed';
+import { db } from './sqlite';
+export { db } from './sqlite';
 import { seal, unseal } from './vault';
 import { quotes, syncBybit, syncAster } from './exchanges';
 import { editValue } from './validation';
 import type { Asset, Ledger, Connection, Period } from './types';
 
-export function db(){if(!env.DB) throw new Error('数据存储暂不可用，请稍后重试');return env.DB;}
 export const chinaDate=()=>new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Shanghai'});
 export async function initialize(owner:string){
   const ready=await db().prepare('SELECT value FROM settings WHERE owner = ? AND key = ?').bind(owner,'initialized').first();
   if(ready)return;
-  const seed=seedLedger();
+  const source=readSource(), seed=seedLedger(source);
   await db().batch([
     ...seed.assets.map(a=>db().prepare('INSERT OR IGNORE INTO assets(owner,id,data) VALUES(?,?,?)').bind(owner,a.id,JSON.stringify(a))),
     db().prepare('INSERT OR IGNORE INTO settings(owner,key,value) VALUES(?,?,?)').bind(owner,'fx',String(seed.fx)),
+    db().prepare('INSERT OR IGNORE INTO settings(owner,key,value) VALUES(?,?,?)').bind(owner,'source-ledger',JSON.stringify(source)),
     db().prepare('INSERT OR IGNORE INTO settings(owner,key,value) VALUES(?,?,?)').bind(owner,'initialized','1'),
   ]);
 }
@@ -25,7 +26,8 @@ export async function getLedger(owner:string):Promise<Ledger>{
     db().prepare('SELECT exchange FROM connections WHERE owner = ?').bind(owner).all<{exchange:string}>(),
     db().prepare('SELECT data FROM snapshots WHERE owner = ? ORDER BY date DESC LIMIT 730').bind(owner).all<{data:string}>(),
   ]);
-  const ledger=seedLedger();
+  const source=settings.results.find(s=>s.key==='source-ledger');
+  const ledger=seedLedger(source?JSON.parse(source.value):readSource());
   ledger.assets=rows.results.map(r=>JSON.parse(r.data) as Asset).sort((a,b)=>Number(a.id.slice(4))-Number(b.id.slice(4)));
   ledger.fx=Number(settings.results.find(s=>s.key==='fx')?.value??ledger.fx);
   for(const name of ['bybit','aster'] as const){

@@ -1,6 +1,6 @@
-import { env } from 'cloudflare:workers';
+import { serverConfig } from './server-config';
 async function key(){
-  const raw=env.CREDENTIAL_KEY;
+  const raw=serverConfig().credentialKey;
   if(!raw || !/^[0-9a-f]{64}$/i.test(raw)) throw new Error('服务端密钥未配置，暂时无法保存交易所连接');
   return crypto.subtle.importKey('raw',Uint8Array.from(raw.match(/../g)!,x=>parseInt(x,16)),'AES-GCM',false,['encrypt','decrypt']);
 }

@@ -1,8 +1,11 @@
 import {apiOwner,json,failure} from '@/lib/api';
-import {db} from '@/lib/store';
-import raw from '@/lib/imported-ledger.json';
+import {db, initialize} from '@/lib/store';
+import {readSource, type SourceLedger} from '@/lib/seed';
 export async function GET(request:Request){try{
   const owner=await apiOwner(request),id=new URL(request.url).searchParams.get('id');
+  await initialize(owner);
+  const source=await db().prepare('SELECT value FROM settings WHERE owner = ? AND key = ?').bind(owner,'source-ledger').first<{value:string}>();
+  const raw: SourceLedger=source?JSON.parse(source.value):readSource();
   const original=raw.periods.find(p=>p.id===id);
   if(original)return json({rows:original.rows});
   if(!id||!/^daily-\d{4}-\d{2}-\d{2}$/.test(id))return json({error:'未找到记录'},404);

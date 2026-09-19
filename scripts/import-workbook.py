@@ -48,8 +48,8 @@ if abs(baseline['difference']) > 0.01:
 data = {'source': source.name, 'sheet': values.title, 'startedAt': as_of,
         'baselineId': baseline['id'], 'baselineDate': baseline['date'],
         'fx': baseline['fx'], 'periods': periods}
-target = pathlib.Path('lib/imported-ledger.json')
-target.parent.mkdir(exist_ok=True)
+target = pathlib.Path(sys.argv[3]) if len(sys.argv) > 3 else pathlib.Path('lib/imported-ledger.json')
+target.parent.mkdir(parents=True, exist_ok=True)
 target.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
 print(json.dumps({'periods': len(periods), 'rows': len(baseline['rows']), 'baseline': baseline['date'],
                   'total': baseline['total'], 'future': [p['date'] for p in periods if p['future']]}, ensure_ascii=False))
