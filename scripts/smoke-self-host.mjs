@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { cpSync, mkdtempSync, readFileSync, rmSync, existsSync, readdirSync } from 'node:fs';
+import { cpSync, mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync, readdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { Wallet } from 'ethers';
 import { pathToFileURL } from 'node:url';
@@ -166,6 +166,37 @@ try {
   const syncedAfterRestart = await (await request('/api/sync', 'POST', {})).json();
   assert.equal(syncedAfterRestart.assets.find(a => a.mode === 'aster').value, 150);
   assert.equal(syncedAfterRestart.connections.aster.error, null);
+  assert.equal(syncedAfterRestart.fx, 7.1234);
+  assert.equal(syncedAfterRestart.fxStatus.source, 'Coinbase');
+  assert.equal(syncedAfterRestart.fxStatus.error, null);
+  assert.equal(syncedAfterRestart.history.find(p => p.id === 'E1').fx, source.periods[0].fx, 'Original history keeps its historical exchange rate');
+  const dailyFx = syncedAfterRestart.history.find(p => p.id.startsWith('daily-') && !p.archived);
+  assert.equal(dailyFx.fx, 7.1234);
+  assert.equal(dailyFx.cny, dailyFx.total * 7.1234);
+  assert.equal(dailyFx.fxStatus.source, 'Coinbase');
+  const forceSync = async () => {
+    const fxDb = new DatabaseSync(join(directory, 'ledger.sqlite'));
+    fxDb.prepare("UPDATE settings SET value='0' WHERE owner='owner' AND key='last-attempt'").run();
+    fxDb.close();
+    const response = await request('/api/sync', 'POST', {});
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  writeFileSync(join(directory, 'fx-failure'), 'fixture');
+  const failedFx = await forceSync();
+  assert.equal(failedFx.fx, 7.1234, 'Provider failure preserves the rate');
+  assert.equal(failedFx.fxStatus.fetchedAt, syncedAfterRestart.fxStatus.fetchedAt, 'Failure cannot renew the quote timestamp');
+  assert.match(failedFx.fxStatus.error, /保留上次汇率/);
+  assert.equal(failedFx.connections.aster.error, null, 'FX failure does not block exchange updates');
+  await stop(); await start();
+  assert.equal((await (await request('/api/ledger')).json()).fx, 7.1234, 'Auto rate persists across restart');
+  rmSync(join(directory, 'fx-failure'));
+  writeFileSync(join(directory, 'market-failure'), 'fixture');
+  const independentFx = await forceSync();
+  assert.equal(independentFx.fxStatus.error, null, 'FX refresh remains independent of crypto quote failures');
+  assert.ok(independentFx.assets.find(a => a.mode === 'market').error);
+  rmSync(join(directory, 'market-failure'));
+  await forceSync();
   assert.equal(output.includes(apiWallet.privateKey), false);
   // Existing databases need no schema migration; old snapshots derive workbook withdrawals from their rows.
   const withdrawalDb = new DatabaseSync(join(directory, 'ledger.sqlite'));
@@ -200,5 +231,5 @@ try {
   cookie = '';
   for (let attempt = 0; attempt < 10; attempt++) assert.equal((await request('/api/login', 'POST', { password: 'incorrect-test-password' })).status, 401);
   assert.equal((await request('/api/login', 'POST', { password })).status, 429);
-  console.log('Production smoke passed: authentication, import and backup, edits/history, Aster API wallet encryption, restart synchronization, withdrawal CRUD/persistence and login throttling.');
+  console.log('Production smoke passed: authentication, import and backup, edits/history, Aster API wallet encryption, automatic FX/failure preservation, restart synchronization, withdrawal CRUD/persistence and login throttling.');
 } finally { await stop(); rmSync(directory, { recursive: true }); }

@@ -44,7 +44,7 @@ function importPlan(source: SourceLedger, current: Ledger, previous: SourceLedge
       retained.push(asset.project + ' 手动修改（额外保留）');
     }
   }
-  if (current.fx !== old.fx) { imported.fx = current.fx; retained.push('手动汇率'); }
+  if (current.fx !== old.fx || current.fxStatus.source !== 'saved') { imported.fx = current.fx; imported.fxStatus = current.fxStatus; retained.push('当前汇率'); }
   return { ledger: imported, retained };
 }
 
@@ -82,10 +82,10 @@ export async function importLedger(owner: string, input: unknown, apply: boolean
       ...snapshots.results.map(row => JSON.parse(row.data)),
     ].map((period, index) => ({ ...period, id: `archive-${batchId}-${index}`, archived: true }));
     const date = chinaDate(), total = plan.ledger.assets.reduce((sum, a) => sum + (a.value ?? 0), 0);
-    const today = { id: 'daily-' + date, date, total, fx: plan.ledger.fx, cny: total * plan.ledger.fx, future: false, difference: 0,
+    const today = { id: 'daily-' + date, date, total, fx: plan.ledger.fx, fxStatus: plan.ledger.fxStatus, cny: total * plan.ledger.fx, future: false, difference: 0,
       partial: plan.ledger.assets.some(a => a.mode !== 'manual' && (!!a.error || Date.now() - Date.parse(a.updatedAt) > 900000)),
       updatedAt: new Date().toISOString(), assets: plan.ledger.assets };
-    const settings: Record<string, string> = { 'source-ledger': JSON.stringify(source), 'source-import-hash': fingerprint, fx: String(plan.ledger.fx), 'last-attempt': '0' };
+    const settings: Record<string, string> = { 'source-ledger': JSON.stringify(source), 'source-import-hash': fingerprint, fx: String(plan.ledger.fx), 'fx-status': JSON.stringify(plan.ledger.fxStatus), 'last-attempt': '0' };
     await db().batch([
       db().prepare('DELETE FROM assets WHERE owner = ?').bind(owner),
       ...plan.ledger.assets.map(asset => db().prepare('INSERT INTO assets(owner,id,data) VALUES(?,?,?)').bind(owner, asset.id, JSON.stringify(asset))),

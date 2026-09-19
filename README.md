@@ -77,7 +77,8 @@ sudo -u asset-ledger env ASSET_DATA_DIR=/var/lib/asset-ledger /opt/asset-ledger/
 - Virtual：优先使用 CoinGecko 美元报价，失败时改用 Coinbase 美元兑换率倒数；分别标明行情时间或获取时间。数量手动维护。
 - Bybit：只读 HMAC API，验证 `readOnly = 1` 后读取统一账户 `totalEquity` 和资金账户余额。包含未实现盈亏，不重复累加保证金或持仓名义价值；不含子账户及 Earn。
 - Aster：API Pro 钱包地址（signer）+ 对应私钥，使用 V3 EIP-712 签名。读取 `/fapi/v3/accountWithJoinMargin` 的合约 `marginBalance`，可选 `/api/v3/account` 的现货 `free + locked`。不含质押；程序只允许这两个余额查询 GET 路由，不开放交易、划转或提现功能。
-- 其他资产与汇率保留原值，支持手动编辑；不把项目名误当作同名代币，积分和 NFT 保留预估口径。
+- USD/CNY：随资产刷新自动获取 Coinbase 当前汇率（直接使用每美元对应人民币数量）；失败时使用 Frankfurter 的 ECB 日度参考汇率。页面标明来源及获取时间 / 报价日期，不把日度参考标成逐笔实时报价。两者均失败则保留旧值及原时间，并提示失败；汇率失败不阻止交易所同步。临时手动备用值会在下次自动获取成功后被替换，历史快照保留当时汇率。
+- 其他资产保留原值，支持手动编辑；不把项目名误当作同名代币，积分和 NFT 保留预估口径。
 - 页面打开且前台在线时每 60 秒刷新，每天保存最近一次刷新或编辑。页面关闭时没有后台定时任务。
 - 接口失败保留旧值及原时间，不用零覆盖失败结果。资产变化含资金进出，不能视为投资收益。未来预填记录不参与历史曲线。
 
@@ -144,5 +145,6 @@ Schema 位于 `db/schema.ts`，`npm run db:generate` 生成增量迁移。迁移
 - [Bybit 钱包余额](https://bybit-exchange.github.io/docs/v5/account/wallet-balance)、[只读权限](https://bybit-exchange.github.io/docs/v5/user/apikey-info)、[资金账户](https://bybit-exchange.github.io/docs/v5/asset/balance/all-balance)
 - [Aster API Pro 签名](https://asterdex.github.io/aster-api-website/futures-v3/general-info/)、[合约账户](https://asterdex.github.io/aster-api-website/futures-v3/account%26trades/)、[现货账户](https://asterdex.github.io/aster-api-website/spot-v3/account%26trades/)
 - [CoinGecko](https://docs.coingecko.com/reference/simple-price)、[Coinbase](https://docs.cdp.coinbase.com/coinbase-app/track-apis/exchange-rates)
+- [Frankfurter 汇率与 ECB 来源筛选](https://frankfurter.dev/)
 
 真实 Bybit / Aster 账户需在页面填写对应凭据后验证，测试使用临时生成的测试钱包和合成账户数据。
