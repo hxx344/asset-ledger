@@ -1,0 +1,5 @@
+export type Balance = { coin: string; account: string; quantity: number; value: number; price: number };
+export type Asset = { id: string; project: string; kind: string; quantity: number | null; price: number | null; value: number | null; cell: string; mode: 'manual' | 'market' | 'bybit' | 'aster'; updatedAt: string; status: string; error?: string; details?: Balance[] };
+export type Period = { id: string; date: string; total: number; fx: number; cny: number; future: boolean; difference: number; partial?: boolean };
+export type Connection = { configured: boolean; lastSync: string | null; error: string | null; scope: string; label?: string };
+export type Ledger = { assets: Asset[]; history: Period[]; fx: number; baselineDate: string; startedAt: string; baselineTotal: number; connections: { bybit: Connection; aster: Connection } };
