@@ -10,7 +10,13 @@
 curl -fsSL https://raw.githubusercontent.com/hxx344/asset-ledger/main/install.sh | sudo bash
 ```
 
-自动安装依赖和 Node.js、校验下载、拉取代码、构建、生成登录密码、初始化 SQLite 并注册开机自启服务。访问 `http://服务器IP:3000`，使用终端显示的密码登录。服务器安全组需允许 TCP 3000，脚本不修改现有防火墙规则。IP 直连使用 HTTP，登录和页面数据未经过 TLS 加密。
+自动安装依赖和 Node.js、校验下载、拉取代码、构建、生成登录密码、初始化 SQLite 并注册开机自启服务。访问 `http://服务器IP:5678`，使用终端显示的密码登录。服务器安全组需允许 TCP 5678，脚本不修改现有防火墙规则。IP 直连使用 HTTP，登录和页面数据未经过 TLS 加密。
+
+已部署的服务切换到 5678（保留数据和配置）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/hxx344/asset-ledger/main/install.sh | sudo bash -s -- --port 5678
+```
 
 自定义端口：
 

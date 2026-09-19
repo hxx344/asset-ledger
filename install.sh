@@ -13,10 +13,10 @@ DATA_FILE=''
 
 usage() {
   cat <<'HELP'
-用法：sudo bash install.sh [--port 3000] [--local] [--data-file /path/资产统计.xlsx]
+用法：sudo bash install.sh [--port 5678] [--local] [--data-file /path/资产统计.xlsx]
 Ubuntu 22.04/24.04、Debian 12/13，amd64/arm64，需 systemd。
 首次安装自动生成登录密码。重复执行升级，保留配置、资产、历史和 API 加密密钥。
-默认监听 0.0.0.0:3000；--local 仅监听本机。升级不指定端口时沿用原配置。
+默认监听 0.0.0.0:5678；--local 仅监听本机。升级不指定端口时沿用原配置。
 HELP
 }
 die() { printf '错误：%s\n' "$*" >&2; exit 1; }
@@ -43,7 +43,7 @@ fi
 install -d -m 0755 "$APP_ROOT"
 exec 9>"$APP_ROOT/install.lock"
 flock -n 9 || die '另一个安装或升级正在运行。'
-PORT=3000
+PORT=5678
 BIND=0.0.0.0
 if [[ -f $APP_ROOT/deploy.env ]]; then
   [[ $(stat -c %u "$APP_ROOT/deploy.env") == 0 ]] || die '部署配置必须归 root 所有。'
