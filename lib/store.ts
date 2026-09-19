@@ -3,8 +3,9 @@ import { db } from './sqlite';
 export { db } from './sqlite';
 import { seal, unseal } from './vault';
 import { quotes, syncBybit, syncAster, validateAsterWallet } from './exchanges';
-import { editValue, type Credentials } from './validation';
-import type { Asset, Ledger, Connection, Period } from './types';
+import { editValue, type Credentials, type WithdrawalInput } from './validation';
+import { embeddedWithdrawals } from './withdrawals';
+import type { Asset, Ledger, Connection, Period, Withdrawal } from './types';
 
 export const chinaDate=()=>new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Shanghai'});
 export async function initialize(owner:string){
@@ -34,7 +35,8 @@ export async function getLedger(owner:string):Promise<Ledger>{
     const meta=settings.results.find(s=>s.key===name+'-status');
     ledger.connections[name]={...ledger.connections[name],...(meta?JSON.parse(meta.value):{}),configured:connectionRows.results.some(r=>r.exchange===name)} as Connection;
   }
-  ledger.history.push(...snapshotRows.results.map(r=>{const {assets:_assets,...period}=JSON.parse(r.data);return period as Period;}));
+  ledger.history.push(...snapshotRows.results.map(r=>{const {assets,...period}=JSON.parse(r.data);return {...period,withdrawn:embeddedWithdrawals(assets??[])} as Period;}));
+  ledger.withdrawals=JSON.parse(settings.results.find(s=>s.key==='withdrawals')?.value??'[]');
   return ledger;
 }
 async function saveAsset(owner:string,a:Asset){await db().prepare('UPDATE assets SET data = ? WHERE owner = ? AND id = ?').bind(JSON.stringify(a),owner,a.id).run();}
@@ -68,6 +70,33 @@ export async function editAsset(owner:string,input:{id:string,quantity:number,pr
 }
 export async function editFx(owner:string,fx:number){
   await lock(owner);try{await setting(owner,'fx',String(fx));await snapshot(owner);return getLedger(owner);}finally{await unlock(owner);}
+}
+export async function saveWithdrawal(owner:string,input:WithdrawalInput,editing=false){
+  await lock(owner);
+  try{
+    const ledger=await getLedger(owner);
+    if(input.date<ledger.baselineDate)throw new Error('新增出金日期不能早于原表基准日 '+ledger.baselineDate+'，原表出金已单独计入');
+    if(input.date>chinaDate())throw new Error('不能登记尚未发生的出金');
+    const existing=ledger.withdrawals.find(row=>row.id===input.id);
+    if(editing&&!existing)throw new Error('未找到出金记录，请刷新页面');
+    if(!editing&&existing){
+      if(existing.date===input.date&&existing.amount===input.amount&&existing.note===input.note)return ledger;
+      throw new Error('出金记录编号重复，请刷新页面');
+    }
+    if(!editing&&ledger.withdrawals.length>=2000)throw new Error('出金记录已达到 2000 条上限');
+    const now=new Date().toISOString();
+    const record:Withdrawal={...input,createdAt:existing?.createdAt??now,updatedAt:now};
+    await setting(owner,'withdrawals',editing?ledger.withdrawals.map(row=>row.id===input.id?record:row):[...ledger.withdrawals,record]);
+    await snapshot(owner);return getLedger(owner);
+  }finally{await unlock(owner);}
+}
+export async function deleteWithdrawal(owner:string,id:string){
+  await lock(owner);
+  try{
+    const ledger=await getLedger(owner);
+    await setting(owner,'withdrawals',ledger.withdrawals.filter(row=>row.id!==id));
+    await snapshot(owner);return getLedger(owner);
+  }finally{await unlock(owner);}
 }
 export async function connect(owner:string,input:Credentials){
   await lock(owner);

@@ -6,6 +6,17 @@ export const connectionSchema=z.discriminatedUnion('exchange',[
   z.object({exchange:z.literal('aster'),walletAddress:z.string().trim().regex(/^0x[0-9a-fA-F]{40}$/),privateKey:z.string().trim().regex(/^(0x)?[0-9a-fA-F]{64}$/),includeSpot:z.boolean().default(false)}).strict(),
 ]);
 export type Credentials=z.infer<typeof connectionSchema>;
+export const withdrawalIdSchema=z.object({id:z.string().uuid()}).strict();
+export const withdrawalSchema=z.object({
+  id:z.string().uuid(),
+  date:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(value=>{
+    const parsed=new Date(value+'T00:00:00Z');
+    return Number.isFinite(parsed.getTime())&&parsed.toISOString().slice(0,10)===value;
+  }),
+  amount:z.number().finite().positive().max(1e12).refine(value=>Number(value.toFixed(2))===value,'金额最多两位小数'),
+  note:z.string().trim().max(200).default(''),
+}).strict();
+export type WithdrawalInput=z.infer<typeof withdrawalSchema>;
 export function editValue(quantity:number,price:number|null){
   if(quantity===0) return 0;
   if(price===null) throw new Error('数量大于零时，请填写单价');

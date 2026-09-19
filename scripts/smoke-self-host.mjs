@@ -54,6 +54,7 @@ try {
   assert.equal((await request('/')).status, 307);
   assert.equal((await request('/api/ledger', 'GET', undefined, { 'oai-authenticated-user-id': 'owner', 'oai-authenticated-user-email': 'spoof@example.test' })).status, 401);
   assert.equal((await request('/api/import', 'POST', {})).status, 401);
+  assert.equal((await request('/api/withdrawals', 'POST', {})).status, 401);
   assert.equal((await request('/api/login', 'POST', { password }, { origin: 'https://untrusted.example' })).status, 403);
   assert.equal((await request('/api/login', 'POST', { password: 'wrong-password-123' })).status, 401);
   const login = await request('/api/login', 'POST', { password });
@@ -166,9 +167,38 @@ try {
   assert.equal(syncedAfterRestart.assets.find(a => a.mode === 'aster').value, 150);
   assert.equal(syncedAfterRestart.connections.aster.error, null);
   assert.equal(output.includes(apiWallet.privateKey), false);
+  // Existing databases need no schema migration; old snapshots derive workbook withdrawals from their rows.
+  const withdrawalDb = new DatabaseSync(join(directory, 'ledger.sqlite'));
+  const oldRows = [{ id: 'row-999', project: '出金', value: 25 }];
+  withdrawalDb.prepare('INSERT INTO snapshots(owner,date,data) VALUES(?,?,?)').run('owner', '2020-01-01', JSON.stringify({ id: 'daily-2020-01-01', date: '2020-01-01', total: 125, fx: 7, cny: 875, future: false, difference: 0, assets: oldRows }));
+  withdrawalDb.close();
+  const beforeWithdrawal = await (await request('/api/ledger')).json();
+  assert.deepEqual(beforeWithdrawal.withdrawals, []);
+  assert.equal(beforeWithdrawal.history.find(p => p.date === '2020-01-01').withdrawn, 25);
+  const withdrawal = { id: crypto.randomUUID(), date: new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' }), amount: 100.25, note: 'Synthetic withdrawal' };
+  assert.equal((await request('/api/withdrawals', 'POST', withdrawal, { origin: 'https://untrusted.example' })).status, 403);
+  for (const invalid of [{ amount: -1 }, { amount: 0.001 }, { date: '2099-01-01' }, { date: '2020-01-01' }, { date: '2026-02-30' }, { owner: 'other' }]) {
+    assert.equal((await request('/api/withdrawals', 'POST', { ...withdrawal, ...invalid })).status, 400);
+  }
+  const createdResponse = await request('/api/withdrawals', 'POST', withdrawal);
+  assert.equal(createdResponse.status, 200);
+  const createdWithdrawal = await createdResponse.json();
+  assert.equal(createdWithdrawal.withdrawals.length, 1);
+  assert.equal(createdWithdrawal.withdrawals[0].amount, 100.25);
+  assert.deepEqual(createdWithdrawal.assets, beforeWithdrawal.assets, 'Registering a withdrawal never debits holdings');
+  assert.equal(createdWithdrawal.history.find(p => p.date === '2020-01-01').total, 125);
+  assert.equal((await (await request('/api/withdrawals', 'POST', withdrawal)).json()).withdrawals.length, 1, 'Retries are idempotent');
+  const editedWithdrawal = await (await request('/api/withdrawals', 'PATCH', { ...withdrawal, amount: 90.5 })).json();
+  assert.equal(editedWithdrawal.withdrawals[0].amount, 90.5);
+  await stop(); await start();
+  assert.equal((await (await request('/api/ledger')).json()).withdrawals[0].amount, 90.5);
+  const deletedWithdrawal = await (await request('/api/withdrawals', 'DELETE', { id: withdrawal.id })).json();
+  assert.deepEqual(deletedWithdrawal.withdrawals, []);
+  assert.equal((await request('/api/withdrawals', 'PATCH', withdrawal)).status, 400);
+  assert.equal((await (await request('/api/withdrawals', 'DELETE', { id: withdrawal.id })).json()).withdrawals.length, 0);
   assert.equal((await request('/api/logout', 'POST', {})).status, 200);
   cookie = '';
   for (let attempt = 0; attempt < 10; attempt++) assert.equal((await request('/api/login', 'POST', { password: 'incorrect-test-password' })).status, 401);
   assert.equal((await request('/api/login', 'POST', { password })).status, 429);
-  console.log('Production smoke passed: authentication, import and backup, edits/history, Aster API wallet encryption, failed replacement preservation, restart synchronization and login throttling.');
+  console.log('Production smoke passed: authentication, import and backup, edits/history, Aster API wallet encryption, restart synchronization, withdrawal CRUD/persistence and login throttling.');
 } finally { await stop(); rmSync(directory, { recursive: true }); }
