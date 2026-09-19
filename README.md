@@ -10,13 +10,23 @@
 curl -fsSL https://raw.githubusercontent.com/hxx344/asset-ledger/main/install.sh | sudo bash
 ```
 
-自动安装依赖和 Node.js、校验下载、拉取代码、构建、生成登录密码、初始化 SQLite 并注册开机自启服务。访问 `http://服务器IP:5678`，使用终端显示的密码登录。服务器安全组需允许 TCP 5678，脚本不修改现有防火墙规则。IP 直连使用 HTTP，登录和页面数据未经过 TLS 加密。
+自动安装依赖和 Node.js、校验下载、拉取代码、构建、生成登录密码、初始化 SQLite 并注册开机自启服务。首次安装仅监听服务器本机 `127.0.0.1:5678`，通过 SSH 隧道访问，使用终端显示的独立登录密码进入账本。服务器只需允许现有 SSH 连接，无需对公网开放 5678；脚本不修改 SSH 服务或防火墙规则。
 
-已部署的服务切换到 5678（保留数据和配置）：
+已部署的服务切换为 SSH 隧道访问、端口 5678（在服务器执行，保留数据、密码和加密配置）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/hxx344/asset-ledger/main/install.sh | sudo bash -s -- --port 5678
+curl -fsSL https://raw.githubusercontent.com/hxx344/asset-ledger/main/install.sh | sudo bash -s -- --local --port 5678
 ```
+
+然后在**自己的电脑**上打开 PowerShell 或终端，替换用户名和服务器 IP 后执行：
+
+```bash
+ssh -N -L 127.0.0.1:5678:127.0.0.1:5678 -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 用户名@服务器IP
+```
+
+保持这个 SSH 窗口运行，在本机浏览器打开 `http://127.0.0.1:5678`。输入 SSH 密码时终端不会显示字符；密钥登录沿用你已有的 SSH 配置。页面仍使用安装时生成的账本登录密码。电脑与服务器之间的数据通过 SSH 加密传输，关闭隧道后本机地址不再可用。
+
+SSH 不是默认 22 端口时，在命令中加 `-p SSH端口`；指定密钥可加 `-i 密钥文件路径`。若本机 5678 已被占用，将 `-L` 改为 `127.0.0.1:5679:127.0.0.1:5678`，浏览器改访问 `http://127.0.0.1:5679`。
 
 自定义端口：
 
@@ -24,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/hxx344/asset-ledger/main/install.sh
 curl -fsSL https://raw.githubusercontent.com/hxx344/asset-ledger/main/install.sh | sudo bash -s -- --port 8080
 ```
 
-**升级再次执行同一条命令。** 未指定端口时保留原配置；保留密码、加密密钥、资产和历史。先构建新版本，再停止旧服务并备份数据库；启动检查失败时恢复旧版本、端口和数据库。备份保留在 `/opt/asset-ledger/backups/`，不会自动删除。
+**升级再次执行同一条命令。** 未指定端口和 `--local` 时保留原端口及监听地址，所以旧版公网监听需要显式加 `--local` 切换；保留密码、加密密钥、资产和历史。先构建新版本，再停止旧服务并备份数据库；启动检查失败时恢复旧版本、端口和数据库。备份保留在 `/opt/asset-ledger/backups/`，不会自动删除。
 
 首次安装可导入已上传到服务器的原表：
 
@@ -50,7 +60,7 @@ curl -fsSL https://raw.githubusercontent.com/hxx344/asset-ledger/main/install.sh
 sudo -u asset-ledger env ASSET_DATA_DIR=/var/lib/asset-ledger /opt/asset-ledger/runtime/node-v24.15.0-linux-$( [ "$(uname -m)" = x86_64 ] && echo x64 || echo arm64 )/bin/node /opt/asset-ledger/current/scripts/configure.mjs --reset-password
 ```
 
-`--local` 可仅监听本机。若自行配置 HTTPS 反向代理，通过 systemd override 设置 `PUBLIC_ORIGIN=https://你的域名`，用于同源检查及 Secure Cookie；升级保留 override。
+若曾通过 systemd override 设置过 `PUBLIC_ORIGIN`，切换 SSH 隧道时应移除该设置并重启服务，恢复按本机访问地址校验来源。升级会保留已有 override。
 
 ## 数据口径
 
@@ -88,7 +98,7 @@ npm run build
 npm run test:smoke
 ```
 
-测试覆盖估值、签名、只读路由、行情时效、登录、迁移、事务回滚和重启保留数据。生产启动测试使用临时示例数据库，不访问真实交易所。Linux 持续集成还会验证首次安装、重复升级和失败回滚。
+测试覆盖估值、签名、只读路由、行情时效、登录、迁移、事务回滚和重启保留数据。生产启动测试使用临时示例数据库，不访问真实交易所。Linux 持续集成还会验证首次安装仅监听本机、升级切换为本机监听和失败回滚。
 
 Schema 位于 `db/schema.ts`，`npm run db:generate` 生成增量迁移。迁移执行一次并校验文件哈希，请勿修改已执行的 SQL。
 

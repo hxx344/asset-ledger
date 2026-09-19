@@ -16,7 +16,8 @@ usage() {
 用法：sudo bash install.sh [--port 5678] [--local] [--data-file /path/资产统计.xlsx]
 Ubuntu 22.04/24.04、Debian 12/13，amd64/arm64，需 systemd。
 首次安装自动生成登录密码。重复执行升级，保留配置、资产、历史和 API 加密密钥。
-默认监听 0.0.0.0:5678；--local 仅监听本机。升级不指定端口时沿用原配置。
+首次安装默认监听 127.0.0.1:5678，通过 SSH 隧道访问。
+升级默认沿用原配置；旧版公网监听请加 --local 切换为仅本机。
 HELP
 }
 die() { printf '错误：%s\n' "$*" >&2; exit 1; }
@@ -44,7 +45,7 @@ install -d -m 0755 "$APP_ROOT"
 exec 9>"$APP_ROOT/install.lock"
 flock -n 9 || die '另一个安装或升级正在运行。'
 PORT=5678
-BIND=0.0.0.0
+BIND=127.0.0.1
 if [[ -f $APP_ROOT/deploy.env ]]; then
   [[ $(stat -c %u "$APP_ROOT/deploy.env") == 0 ]] || die '部署配置必须归 root 所有。'
   # shellcheck source=/dev/null
@@ -190,6 +191,13 @@ for ((attempt=0; attempt<30; attempt++)); do
 done
 ((HEALTHY)) || false
 trap - ERR
-printf '\n部署成功，提交：%s\n访问：http://服务器IP:%s\n数据目录：%s\n备份目录：%s\n管理：systemctl status asset-ledger\n重复执行同一命令即可升级。\n' "${COMMIT:0:12}" "$PORT" "$DATA_DIR" "$BACKUP"
-if [[ $BIND == 127.0.0.1 ]]; then printf '当前仅监听本机 127.0.0.1。\n'; fi
-printf '使用 IP 直连时为 HTTP；服务器安全组需允许所选端口。\n'
+printf '\n部署成功，提交：%s\n数据目录：%s\n备份目录：%s\n管理：systemctl status asset-ledger\n重复执行同一命令即可升级。\n' "${COMMIT:0:12}" "$DATA_DIR" "$BACKUP"
+if [[ $BIND == 127.0.0.1 ]]; then
+  printf '当前仅监听服务器本机 127.0.0.1:%s，无需对公网开放此端口。\n' "$PORT"
+  printf '在自己的电脑上执行（替换用户名和服务器 IP）：\n'
+  printf 'ssh -N -L 127.0.0.1:%s:127.0.0.1:%s -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 USER@SERVER_IP\n' "$PORT" "$PORT"
+  printf '保持 SSH 窗口运行，然后在本机浏览器打开 http://127.0.0.1:%s\n' "$PORT"
+else
+  printf '沿用原公网监听配置，访问：http://服务器IP:%s（HTTP）。\n' "$PORT"
+  printf '切换为 SSH 隧道访问：重新执行安装命令并加 --local。\n'
+fi
