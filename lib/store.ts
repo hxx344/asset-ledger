@@ -2,8 +2,8 @@ import { seedLedger, readSource } from './seed';
 import { db } from './sqlite';
 export { db } from './sqlite';
 import { seal, unseal } from './vault';
-import { quotes, syncBybit, syncAster } from './exchanges';
-import { editValue } from './validation';
+import { quotes, syncBybit, syncAster, validateAsterWallet } from './exchanges';
+import { editValue, type Credentials } from './validation';
 import type { Asset, Ledger, Connection, Period } from './types';
 
 export const chinaDate=()=>new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Shanghai'});
@@ -69,10 +69,10 @@ export async function editAsset(owner:string,input:{id:string,quantity:number,pr
 export async function editFx(owner:string,fx:number){
   await lock(owner);try{await setting(owner,'fx',String(fx));await snapshot(owner);return getLedger(owner);}finally{await unlock(owner);}
 }
-type Credentials={exchange:'bybit';apiKey:string;apiSecret:string;region:'global'|'nl'|'tr'|'kz'|'ge'|'ae'|'eu'}|{exchange:'aster';apiKey:string;apiSecret:string;includeSpot:boolean};
 export async function connect(owner:string,input:Credentials){
   await lock(owner);
   try{
+    if(input.exchange==='aster')validateAsterWallet(input);
     const encrypted=await seal(input,owner+':'+input.exchange);
     const prices=await quotes();
     const result=input.exchange==='bybit'?await syncBybit(input,prices):await syncAster(input,prices);
@@ -80,7 +80,7 @@ export async function connect(owner:string,input:Credentials){
     await db().prepare('INSERT INTO connections(owner,exchange,encrypted,updated_at) VALUES(?,?,?,?) ON CONFLICT(owner,exchange) DO UPDATE SET encrypted=excluded.encrypted,updated_at=excluded.updated_at').bind(owner,input.exchange,encrypted,now).run();
     const ledger=await getLedger(owner),asset=ledger.assets.find(a=>a.mode===input.exchange)!;
     await saveAsset(owner,{...asset,quantity:result.total,price:1,value:result.total,status:'只读同步',updatedAt:now,error:undefined,details:result.details});
-    await setting(owner,input.exchange+'-status',{configured:true,lastSync:now,error:null,scope:input.exchange==='bybit'?'统一账户 + 资金账户':input.includeSpot?'合约 + 现货':'合约净权益',label:input.apiKey.slice(-4)});
+    await setting(owner,input.exchange+'-status',{configured:true,lastSync:now,error:null,scope:input.exchange==='bybit'?'统一账户 + 资金账户':input.includeSpot?'API Pro · 合约 + 现货':'API Pro · 合约净权益',label:(input.exchange==='bybit'?input.apiKey:input.walletAddress).slice(-4)});
     await snapshot(owner);return getLedger(owner);
   }finally{await unlock(owner);}
 }

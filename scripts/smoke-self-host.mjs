@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { cpSync, mkdtempSync, readFileSync, rmSync, existsSync, readdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
+import { Wallet } from 'ethers';
+import { pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createServer } from 'node:net';
@@ -23,7 +25,7 @@ async function start() {
   await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
   port = reservation.address().port;
   await new Promise(resolve => reservation.close(resolve));
-  server = spawn(process.execPath, ['server.js'], {
+  server = spawn(process.execPath, ['--import', pathToFileURL(resolve('tests/fixtures/exchange-fetch.mjs')).href, 'server.js'], {
     cwd: runtime, env: { ...process.env, NODE_ENV: 'production', ASSET_DATA_DIR: directory, ASSET_RELEASE: 'smoke', HOSTNAME: '127.0.0.1', PORT: String(port), NEXT_TELEMETRY_DISABLED: '1' },
     stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
   });
@@ -136,9 +138,37 @@ try {
   const afterImportRestart = await (await request('/api/ledger')).json();
   assert.equal(afterImportRestart.dataKind, 'personal');
   assert.equal(afterImportRestart.assets.find(a => a.id === 'row-23').value, 246);
+  const apiWallet = Wallet.createRandom();
+  const walletCredentials = { exchange: 'aster', walletAddress: apiWallet.address, privateKey: apiWallet.privateKey, includeSpot: true };
+  assert.equal((await request('/api/connections', 'POST', { exchange: 'aster', apiKey: 'old-key', apiSecret: 'old-secret', includeSpot: false })).status, 400);
+  const connectedResponse = await request('/api/connections', 'POST', walletCredentials);
+  const connectedText = await connectedResponse.text();
+  assert.equal(connectedResponse.status, 200);
+  assert.equal(connectedText.includes(apiWallet.privateKey), false);
+  const connected = JSON.parse(connectedText);
+  assert.equal(connected.assets.find(a => a.mode === 'aster').value, 150);
+  assert.equal(connected.connections.aster.configured, true);
+  assert.equal(connected.connections.aster.label, apiWallet.address.slice(-4));
+  const secureDb = new DatabaseSync(join(directory, 'ledger.sqlite'));
+  const encrypted = secureDb.prepare("SELECT encrypted FROM connections WHERE exchange = 'aster'").get().encrypted;
+  assert.equal(encrypted.includes(apiWallet.privateKey), false);
+  const sealed = JSON.parse(encrypted), configuration = JSON.parse(originalConfig);
+  const encryptionKey = await crypto.subtle.importKey('raw', Buffer.from(configuration.credentialKey, 'hex'), 'AES-GCM', false, ['decrypt']);
+  const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(sealed.iv), additionalData: new TextEncoder().encode('owner:aster') }, encryptionKey, new Uint8Array(sealed.cipher));
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(plaintext)), walletCredentials);
+  const rejectedResponse = await request('/api/connections', 'POST', { ...walletCredentials, walletAddress: '0x' + '0'.repeat(40) });
+  assert.equal(rejectedResponse.status, 400);
+  assert.equal((await rejectedResponse.text()).includes(apiWallet.privateKey), false);
+  assert.equal(secureDb.prepare("SELECT encrypted FROM connections WHERE exchange = 'aster'").get().encrypted, encrypted);
+  secureDb.close();
+  await stop(); await start();
+  const syncedAfterRestart = await (await request('/api/sync', 'POST', {})).json();
+  assert.equal(syncedAfterRestart.assets.find(a => a.mode === 'aster').value, 150);
+  assert.equal(syncedAfterRestart.connections.aster.error, null);
+  assert.equal(output.includes(apiWallet.privateKey), false);
   assert.equal((await request('/api/logout', 'POST', {})).status, 200);
   cookie = '';
   for (let attempt = 0; attempt < 10; attempt++) assert.equal((await request('/api/login', 'POST', { password: 'incorrect-test-password' })).status, 401);
   assert.equal((await request('/api/login', 'POST', { password })).status, 429);
-  console.log('Production smoke passed: authentication, edit, validated import, automatic backup, connection/edit/history preservation, idempotency, restart persistence and login throttling.');
+  console.log('Production smoke passed: authentication, import and backup, edits/history, Aster API wallet encryption, failed replacement preservation, restart synchronization and login throttling.');
 } finally { await stop(); rmSync(directory, { recursive: true }); }

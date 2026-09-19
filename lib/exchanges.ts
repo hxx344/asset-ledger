@@ -1,4 +1,5 @@
 import type { Balance } from './types';
+import { Wallet } from 'ethers/wallet';
 
 type Json = Record<string, any>;
 type Fetcher = typeof fetch;
@@ -89,18 +90,38 @@ export async function syncBybit(c: BybitCredential, prices: Record<string,Quote>
   }));
   return {total:totalUnified+funds.reduce((s:number,a:Balance)=>s+a.value,0),details:[...details,...funds].filter(a=>a.quantity!==0||a.value!==0)};
 }
-export type AsterCredential={apiKey:string;apiSecret:string;includeSpot:boolean};
-export async function asterGet(c:AsterCredential,path:'/fapi/v4/account'|'/api/v1/account',fetcher:Fetcher=fetch):Promise<Json>{
-  if(!['/fapi/v4/account','/api/v1/account'].includes(path))throw new Error('仅支持 Aster 只读余额接口');
-  const query=new URLSearchParams({recvWindow:'10000',timestamp:String(Date.now())}).toString();
-  const signature=await hmac(c.apiSecret,query);
-  const base=path.startsWith('/fapi/')?'https://fapi.asterdex.com':'https://sapi.asterdex.com';
-  const data=await readJson(base+path+'?'+query+'&signature='+signature,{method:'GET',headers:{'X-MBX-APIKEY':c.apiKey}},fetcher);
-  if(typeof data.code==='number'&&data.code<0)throw new Error(`Aster 读取失败（${data.code}），请检查只读 API、IP 白名单和密钥类型`);
+export type AsterCredential={walletAddress:string;privateKey:string;includeSpot:boolean};
+const ASTER_READ_HOSTS={
+  '/fapi/v3/accountWithJoinMargin':'https://fapi.asterdex.com',
+  '/api/v3/account':'https://sapi.asterdex.com',
+} as const;
+type AsterReadPath=keyof typeof ASTER_READ_HOSTS;
+const ASTER_DOMAIN={name:'AsterSignTransaction',version:'1',chainId:1666,verifyingContract:'0x0000000000000000000000000000000000000000'};
+const ASTER_TYPES={Message:[{name:'msg',type:'string'}]};
+let lastAsterNonce=0;
+export function validateAsterWallet(c:AsterCredential):Wallet{
+  if(!c.walletAddress||!c.privateKey)throw new Error('Aster 连接需要更新：请填写 API Pro 钱包地址和对应私钥；已保留旧估值');
+  let wallet:Wallet;
+  try{wallet=new Wallet(c.privateKey.startsWith('0x')?c.privateKey:'0x'+c.privateKey);}
+  catch{throw new Error('API 钱包私钥无效，请检查是否为 64 位十六进制私钥');}
+  if(wallet.address.toLowerCase()!==c.walletAddress.toLowerCase())throw new Error('API 钱包地址与私钥不匹配，请使用同一个 API 钱包的地址和私钥');
+  return wallet;
+}
+export async function asterGet(c:AsterCredential,path:AsterReadPath,fetcher:Fetcher=fetch):Promise<Json>{
+  if(!Object.hasOwn(ASTER_READ_HOSTS,path))throw new Error('仅支持 Aster 只读余额接口');
+  const wallet=validateAsterWallet(c);
+  // Sign precisely the encoded query sent to Aster. Private keys never leave this server.
+  lastAsterNonce=Math.max(Date.now()*1000,lastAsterNonce+1);
+  const query=new URLSearchParams({nonce:String(lastAsterNonce),signer:wallet.address}).toString();
+  let signature:string;
+  try{signature=await wallet.signTypedData(ASTER_DOMAIN,ASTER_TYPES,{msg:query});}
+  catch{throw new Error('API 钱包签名失败，请检查钱包配置');}
+  const data=await readJson(ASTER_READ_HOSTS[path]+path+'?'+query+'&signature='+signature,{method:'GET'},fetcher);
+  if(typeof data.code==='number'&&data.code<0)throw new Error(`Aster 读取失败（${data.code}），请检查 API Pro 钱包授权和服务器时间`);
   return data;
 }
 export async function syncAster(c:AsterCredential,prices:Record<string,Quote>,fetcher:Fetcher=fetch):Promise<{total:number;details:Balance[]}>{
-  const [account,spot]=await Promise.all([asterGet(c,'/fapi/v4/account',fetcher),c.includeSpot?asterGet(c,'/api/v1/account',fetcher):null]);
+  const [account,spot]=await Promise.all([asterGet(c,'/fapi/v3/accountWithJoinMargin',fetcher),c.includeSpot?asterGet(c,'/api/v3/account',fetcher):null]);
   if(!Array.isArray(account.assets)||(spot&&!Array.isArray(spot.balances)))throw new Error('Aster 账户数据不完整，本次不覆盖旧值');
   const details:Balance[]=await Promise.all(account.assets.map(async(a:Json)=>{
     // marginBalance already includes unrealized P&L, including isolated positions.
