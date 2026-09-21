@@ -1,7 +1,6 @@
 import { randomBytes, scryptSync } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 /** @param {string} directory @param {{password?: string, reset?: boolean}} [options] */
 export function configure(directory, { password, reset = false } = {}) {
@@ -27,7 +26,8 @@ export function configure(directory, { password, reset = false } = {}) {
   }
   return { created: true, password };
 }
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Node resolves the deployed `current` symlink before loading this module.
+if (import.meta.main) {
   const result = configure(resolve(process.env.ASSET_DATA_DIR || '.data'), { reset: process.argv.includes('--reset-password') });
   if (result.created) console.log('登录密码（请保存）：' + result.password);
   else console.log('已有配置、登录密码及加密密钥已保留。');
