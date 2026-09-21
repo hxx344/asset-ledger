@@ -4,4 +4,5 @@ export type FxStatus = { source: 'Coinbase' | 'Frankfurter' | 'manual' | 'saved'
 export type Period = { id: string; date: string; total: number; fx: number; cny: number; future: boolean; difference: number; partial?: boolean; archived?: boolean; withdrawn?: number; fxStatus?: FxStatus };
 export type Withdrawal = { id: string; date: string; amount: number; note: string; createdAt: string; updatedAt: string };
 export type Connection = { configured: boolean; lastSync: string | null; error: string | null; scope: string; label?: string };
-export type Ledger = { dataKind: 'example' | 'personal'; assets: Asset[]; history: Period[]; withdrawals: Withdrawal[]; fx: number; fxStatus: FxStatus; baselineDate: string; startedAt: string; baselineTotal: number; connections: { bybit: Connection; aster: Connection } };
+export type AsterAccount = Connection & { id: string; name: string; value: number; details: Balance[]; updatedAt: string; includeSpot: boolean; walletAddress?: string };
+export type Ledger = { dataKind: 'example' | 'personal'; assets: Asset[]; history: Period[]; withdrawals: Withdrawal[]; asterAccounts: AsterAccount[]; fx: number; fxStatus: FxStatus; baselineDate: string; startedAt: string; baselineTotal: number; connections: { bybit: Connection; aster: Connection } };

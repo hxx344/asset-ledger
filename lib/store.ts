@@ -3,10 +3,11 @@ import { db } from './sqlite';
 export { db } from './sqlite';
 import { seal, unseal } from './vault';
 import { quotes, syncBybit, syncAster, validateAsterWallet } from './exchanges';
-import { editValue, type Credentials, type WithdrawalInput } from './validation';
+import { editValue, type Credentials, type WithdrawalInput, type AsterAccountInput } from './validation';
+import { asterKey, readAsterAccounts, aggregateAster } from './aster-accounts';
 import { embeddedWithdrawals } from './withdrawals';
 import { yuanQuote } from './fx';
-import type { Asset, Ledger, Connection, Period, Withdrawal, FxStatus } from './types';
+import type { Asset, Ledger, Connection, Period, Withdrawal, FxStatus, AsterAccount } from './types';
 
 export const chinaDate=()=>new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Shanghai'});
 export async function initialize(owner:string){
@@ -37,6 +38,10 @@ export async function getLedger(owner:string):Promise<Ledger>{
     const meta=settings.results.find(s=>s.key===name+'-status');
     ledger.connections[name]={...ledger.connections[name],...(meta?JSON.parse(meta.value):{}),configured:connectionRows.results.some(r=>r.exchange===name)} as Connection;
   }
+  const savedAccounts=settings.results.find(s=>s.key==='aster-accounts')?.value;
+  const asterAsset=ledger.assets.find(a=>a.mode==='aster');
+  ledger.asterAccounts=readAsterAccounts(savedAccounts,connectionRows.results.map(r=>r.exchange),asterAsset,ledger.connections.aster);
+  if(savedAccounts!==undefined&&asterAsset)ledger.connections.aster=aggregateAster(ledger.asterAccounts,asterAsset,new Date().toISOString()).connection;
   ledger.history.push(...snapshotRows.results.map(r=>{const {assets,...period}=JSON.parse(r.data);return {...period,withdrawn:embeddedWithdrawals(assets??[])} as Period;}));
   ledger.withdrawals=JSON.parse(settings.results.find(s=>s.key==='withdrawals')?.value??'[]');
   return ledger;
@@ -104,26 +109,79 @@ export async function deleteWithdrawal(owner:string,id:string){
   }finally{await unlock(owner);}
 }
 export async function connect(owner:string,input:Credentials){
+  if(input.exchange==='aster')return connectAsterAccount(owner,{...input,id:'default',name:'默认账号'},'legacy');
   await lock(owner);
   try{
-    if(input.exchange==='aster')validateAsterWallet(input);
     const encrypted=await seal(input,owner+':'+input.exchange);
     const prices=await quotes();
-    const result=input.exchange==='bybit'?await syncBybit(input,prices):await syncAster(input,prices);
+    const result=await syncBybit(input,prices);
     const now=new Date().toISOString();
     await db().prepare('INSERT INTO connections(owner,exchange,encrypted,updated_at) VALUES(?,?,?,?) ON CONFLICT(owner,exchange) DO UPDATE SET encrypted=excluded.encrypted,updated_at=excluded.updated_at').bind(owner,input.exchange,encrypted,now).run();
     const ledger=await getLedger(owner),asset=ledger.assets.find(a=>a.mode===input.exchange)!;
     await saveAsset(owner,{...asset,quantity:result.total,price:1,value:result.total,status:'只读同步',updatedAt:now,error:undefined,details:result.details});
-    await setting(owner,input.exchange+'-status',{configured:true,lastSync:now,error:null,scope:input.exchange==='bybit'?'统一账户 + 资金账户':input.includeSpot?'API Pro · 合约 + 现货':'API Pro · 合约净权益',label:(input.exchange==='bybit'?input.apiKey:input.walletAddress).slice(-4)});
+    await setting(owner,'bybit-status',{configured:true,lastSync:now,error:null,scope:'统一账户 + 资金账户',label:input.apiKey.slice(-4)});
     await snapshot(owner);return getLedger(owner);
   }finally{await unlock(owner);}
 }
 export async function disconnect(owner:string,exchange:'bybit'|'aster'){
+  if(exchange==='aster')return deleteAsterAccount(owner,'default','disconnect');
   await lock(owner);try{
     const ledger=await getLedger(owner),asset=ledger.assets.find(a=>a.mode===exchange)!;
     await db().prepare('DELETE FROM connections WHERE owner = ? AND exchange = ?').bind(owner,exchange).run();
     await setting(owner,exchange+'-status',{configured:false,lastSync:ledger.connections[exchange].lastSync,error:null,scope:ledger.connections[exchange].scope});
     await saveAsset(owner,{...asset,status:'已断开 · 保留旧值',error:undefined});await snapshot(owner);return getLedger(owner);
+  }finally{await unlock(owner);}
+}
+async function saveAsterAccounts(owner:string,accounts:AsterAccount[],asset:Asset,credential?:{key:string;encrypted?:string}){
+  const now=new Date().toISOString(),aggregate=aggregateAster(accounts,asset,now);
+  const statements=[
+    ...Object.entries({'aster-accounts':accounts,'aster-status':aggregate.connection}).map(([key,value])=>db().prepare('INSERT INTO settings(owner,key,value) VALUES(?,?,?) ON CONFLICT(owner,key) DO UPDATE SET value=excluded.value').bind(owner,key,JSON.stringify(value))),
+    db().prepare('UPDATE assets SET data = ? WHERE owner = ? AND id = ?').bind(JSON.stringify(aggregate.asset),owner,asset.id),
+  ];
+  if(credential)statements.push(credential.encrypted===undefined
+    ?db().prepare('DELETE FROM connections WHERE owner = ? AND exchange = ?').bind(owner,credential.key)
+    :db().prepare('INSERT INTO connections(owner,exchange,encrypted,updated_at) VALUES(?,?,?,?) ON CONFLICT(owner,exchange) DO UPDATE SET encrypted=excluded.encrypted,updated_at=excluded.updated_at').bind(owner,credential.key,credential.encrypted,now));
+  await db().batch(statements);
+}
+export async function connectAsterAccount(owner:string,input:AsterAccountInput,editing:boolean|'legacy'){
+  await lock(owner);
+  try{
+    const ledger=await getLedger(owner),accounts=ledger.asterAccounts,existing=accounts.find(a=>a.id===input.id);
+    if(editing===true&&!existing)throw new Error('未找到该 Aster 账号，请刷新页面');
+    if(editing===false&&existing)throw new Error('账号已存在，请使用更新连接');
+    if(!existing&&accounts.length>=10)throw new Error('最多添加 10 个 Aster 账号');
+    if(accounts.some(a=>a.id!==input.id&&a.name===input.name))throw new Error('账号名称已存在');
+    const credentials={exchange:'aster' as const,walletAddress:input.walletAddress,privateKey:input.privateKey,includeSpot:input.includeSpot};
+    const wallet=validateAsterWallet(credentials),key=asterKey(input.id);
+    if(accounts.some(a=>a.id!==input.id&&a.walletAddress?.toLowerCase()===wallet.address.toLowerCase()))throw new Error('该 API 钱包已存在，请更新或移除已有账号');
+    const stored=await db().prepare("SELECT exchange,encrypted FROM connections WHERE owner = ? AND (exchange = 'aster' OR exchange LIKE 'aster:%')").bind(owner).all<{exchange:string;encrypted:string}>();
+    for(const row of stored.results){
+      if(row.exchange===key)continue;
+      let other;
+      try{other=await unseal(row.encrypted,owner+':'+row.exchange);}catch{throw new Error('已有 Aster 连接无法读取，请先更新或移除异常账号');}
+      if(other.walletAddress?.toLowerCase()===wallet.address.toLowerCase())throw new Error('该 API 钱包已连接，请更新已有账号');
+      const account=accounts.find(a=>asterKey(a.id)===row.exchange);
+      if(account)account.walletAddress=other.walletAddress;
+    }
+    const encrypted=await seal(credentials,owner+':'+key);
+    const result=await syncAster(credentials,await quotes()),now=new Date().toISOString();
+    const account:AsterAccount={id:input.id,name:input.name,includeSpot:input.includeSpot,walletAddress:wallet.address,configured:true,lastSync:now,updatedAt:now,error:null,scope:input.includeSpot?'API Pro · 合约 + 现货':'API Pro · 合约净权益',label:wallet.address.slice(-4),value:result.total,details:result.details};
+    await saveAsterAccounts(owner,existing?accounts.map(a=>a.id===input.id?account:a):[...accounts,account],ledger.assets.find(a=>a.mode==='aster')!,{key,encrypted});
+    await snapshot(owner);return getLedger(owner);
+  }finally{await unlock(owner);}
+}
+export async function deleteAsterAccount(owner:string,id:string,action:'disconnect'|'remove'){
+  await lock(owner);
+  try{
+    const ledger=await getLedger(owner),existing=ledger.asterAccounts.find(a=>a.id===id);
+    if(!existing)throw new Error('未找到该 Aster 账号，请刷新页面');
+    if(action==='disconnect'&&!existing.walletAddress){
+      const row=await db().prepare('SELECT encrypted FROM connections WHERE owner = ? AND exchange = ?').bind(owner,asterKey(id)).first<{encrypted:string}>();
+      if(row){try{existing.walletAddress=(await unseal(row.encrypted,owner+':'+asterKey(id))).walletAddress;}catch{/* A broken connection can still be disconnected. */}}
+    }
+    const accounts=action==='remove'?ledger.asterAccounts.filter(a=>a.id!==id):ledger.asterAccounts.map(a=>a.id===id?{...a,configured:false,error:null}:a);
+    await saveAsterAccounts(owner,accounts,ledger.assets.find(a=>a.mode==='aster')!,{key:asterKey(id)});
+    await snapshot(owner);return getLedger(owner);
   }finally{await unlock(owner);}
 }
 export async function refresh(owner:string){
@@ -133,7 +191,7 @@ export async function refresh(owner:string){
     const last=await db().prepare('SELECT value FROM settings WHERE owner = ? AND key = ?').bind(owner,'last-attempt').first<{value:string}>();
     if(last&&Date.now()-Number(last.value)<30000)return ledger;
     await setting(owner,'last-attempt',String(Date.now()));
-    const stored=await db().prepare('SELECT exchange,encrypted FROM connections WHERE owner = ?').bind(owner).all<{exchange:'bybit'|'aster',encrypted:string}>();
+    const stored=await db().prepare('SELECT exchange,encrypted FROM connections WHERE owner = ?').bind(owner).all<{exchange:string,encrypted:string}>();
     const [marketResult,fxResult]=await Promise.allSettled([quotes(),yuanQuote()]);
     const prices=marketResult.status==='fulfilled'?marketResult.value:undefined;
     const marketError=marketResult.status==='rejected'?(marketResult.reason instanceof Error?marketResult.reason.message:'无法获取行情'):undefined;
@@ -142,21 +200,34 @@ export async function refresh(owner:string){
     const virtual=ledger.assets.find(a=>a.mode==='market')!;
     if(prices){await saveAsset(owner,{...virtual,price:prices.VIRTUAL.price,value:(virtual.quantity??0)*prices.VIRTUAL.price,updatedAt:prices.VIRTUAL.at,status:prices.VIRTUAL.source+' · 实时单价',error:undefined});}
     else await saveAsset(owner,{...virtual,status:'行情失败 · 保留旧值',error:marketError});
-    await Promise.all(stored.results.map(async row=>{
-      const asset=ledger.assets.find(a=>a.mode===row.exchange)!;
+    await Promise.all(stored.results.filter(row=>row.exchange==='bybit').map(async row=>{
+      const asset=ledger.assets.find(a=>a.mode==='bybit')!;
       try{
         if(!prices)throw new Error(marketError);
         const c=await unseal(row.encrypted,owner+':'+row.exchange);
-        const result=row.exchange==='bybit'?await syncBybit(c,prices):await syncAster(c,prices);
+        const result=await syncBybit(c,prices);
         const now=new Date().toISOString();
         await saveAsset(owner,{...asset,quantity:result.total,price:1,value:result.total,details:result.details,updatedAt:now,status:'只读同步',error:undefined});
-        await setting(owner,row.exchange+'-status',{...ledger.connections[row.exchange],lastSync:now,error:null});
+        await setting(owner,'bybit-status',{...ledger.connections.bybit,lastSync:now,error:null});
       }catch(e){
         const error=e instanceof Error?e.message:'同步暂时失败';
         await saveAsset(owner,{...asset,status:'同步失败 · 保留旧值',error});
-        await setting(owner,row.exchange+'-status',{...ledger.connections[row.exchange],error});
+        await setting(owner,'bybit-status',{...ledger.connections.bybit,error});
       }
     }));
+    if(ledger.asterAccounts.length){
+      const accounts=await Promise.all(ledger.asterAccounts.map(async account=>{
+        const row=stored.results.find(r=>r.exchange===asterKey(account.id));
+        if(!row)return account;
+        try{
+          if(!prices)throw new Error(marketError);
+          const credentials=await unseal(row.encrypted,owner+':'+row.exchange);
+          const result=await syncAster(credentials,prices),now=new Date().toISOString();
+          return {...account,walletAddress:credentials.walletAddress,value:result.total,details:result.details,lastSync:now,updatedAt:now,error:null};
+        }catch(e){return {...account,error:e instanceof Error?e.message:'同步暂时失败'};}
+      }));
+      await saveAsterAccounts(owner,accounts,ledger.assets.find(a=>a.mode==='aster')!);
+    }
     await snapshot(owner);return getLedger(owner);
   }finally{await unlock(owner);}
 }

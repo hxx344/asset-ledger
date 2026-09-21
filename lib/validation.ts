@@ -6,6 +6,16 @@ export const connectionSchema=z.discriminatedUnion('exchange',[
   z.object({exchange:z.literal('aster'),walletAddress:z.string().trim().regex(/^0x[0-9a-fA-F]{40}$/),privateKey:z.string().trim().regex(/^(0x)?[0-9a-fA-F]{64}$/),includeSpot:z.boolean().default(false)}).strict(),
 ]);
 export type Credentials=z.infer<typeof connectionSchema>;
+export const asterAccountId=z.union([z.literal('default'),z.string().uuid()]);
+export const asterAccountSchema=z.object({
+  id:asterAccountId,
+  name:z.string().trim().min(1).max(40),
+  walletAddress:z.string().trim().regex(/^0x[0-9a-fA-F]{40}$/),
+  privateKey:z.string().trim().regex(/^(0x)?[0-9a-fA-F]{64}$/),
+  includeSpot:z.boolean().default(false),
+}).strict();
+export const asterAccountDeleteSchema=z.object({id:asterAccountId,action:z.enum(['disconnect','remove'])}).strict();
+export type AsterAccountInput=z.infer<typeof asterAccountSchema>;
 export const withdrawalIdSchema=z.object({id:z.string().uuid()}).strict();
 export const withdrawalSchema=z.object({
   id:z.string().uuid(),

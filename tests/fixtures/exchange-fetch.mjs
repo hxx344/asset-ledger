@@ -1,7 +1,7 @@
 // Production smoke only: injected with Node --import; never loaded by the app itself.
 import assert from 'node:assert/strict';
 import { verifyTypedData } from 'ethers';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 const flag = name => existsSync(join(process.env.ASSET_DATA_DIR, name));
 const realFetch = globalThis.fetch;
@@ -22,7 +22,10 @@ globalThis.fetch = async (input, init = {}) => {
       { name: 'AsterSignTransaction', version: '1', chainId: 1666, verifyingContract: '0x0000000000000000000000000000000000000000' },
       { Message: [{ name: 'msg', type: 'string' }] }, { msg: url.search.slice(1) }, signature,
     ), url.searchParams.get('signer'));
-    if (url.hostname === 'fapi.asterdex.com' && url.pathname === '/fapi/v3/accountWithJoinMargin') return Response.json({ assets: [{ asset: 'USDT', marginBalance: '125' }] });
+    const accounts=flag('aster-fixtures.json')?JSON.parse(readFileSync(join(process.env.ASSET_DATA_DIR,'aster-fixtures.json'),'utf8')):{};
+    const account=accounts[url.searchParams.get('signer').toLowerCase()];
+    if(account?.failure)return new Response('',{status:503});
+    if (url.hostname === 'fapi.asterdex.com' && url.pathname === '/fapi/v3/accountWithJoinMargin') return Response.json({ assets: [{ asset: 'USDT', marginBalance: String(account?.total??125) }] });
     if (url.hostname === 'sapi.asterdex.com' && url.pathname === '/api/v3/account') return Response.json({ balances: [{ asset: 'USDC', free: '20', locked: '5' }] });
     throw new Error('Unexpected Aster route in test');
   }
