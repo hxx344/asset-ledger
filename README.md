@@ -79,10 +79,10 @@ curl -fsSL https://raw.githubusercontent.com/hxx344/asset-ledger/main/install.sh
 忘记密码时重置（保留交易所加密密钥，旧会话失效）：
 
 ```bash
-sudo -u asset-ledger env ASSET_DATA_DIR=/var/lib/asset-ledger /opt/asset-ledger/runtime/node-v24.15.0-linux-$( [ "$(uname -m)" = x86_64 ] && echo x64 || echo arm64 )/bin/node "$(readlink -f /opt/asset-ledger/current/scripts/configure.mjs)" --reset-password
+sudo -u asset-ledger env ASSET_DATA_DIR=/var/lib/asset-ledger bash -c 'exec /opt/asset-ledger/runtime/node-v24.15.0-linux-$( [ "$(uname -m)" = x86_64 ] && echo x64 || echo arm64 )/bin/node "$(readlink -f /opt/asset-ledger/current/scripts/configure.mjs)" --reset-password'
 ```
 
-命令会显示新密码，请保存并更新聚合工作台中 Asset Ledger 的登录密码。这里先解析 `current` 的实际路径，兼容旧版本中经目录链接运行重置脚本时直接退出、没有输出的问题；无需先升级。原资产数据与交易所加密密钥保留。
+命令会显示新密码，请保存并更新聚合工作台中 Asset Ledger 的登录密码。这里以服务用户解析 `current` 的实际路径，兼容旧版本中经目录链接运行重置脚本时直接退出、没有输出的问题；无需先升级。原资产数据与交易所加密密钥保留。
 
 若曾通过 systemd override 设置过 `PUBLIC_ORIGIN`，切换 SSH 隧道时应移除该设置并重启服务，恢复按本机访问地址校验来源。升级会保留已有 override。
 
