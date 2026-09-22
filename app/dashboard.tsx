@@ -93,6 +93,8 @@ export default function Dashboard({initial}:{initial:Ledger}){
   catch(e){if(!controller.signal.aborted&&mountedRef.current)setFormError(e instanceof Error?e.message:'无法读取历史明细');}
  }
  const total=ledger.assets.reduce((s,a)=>s+(a.value??0),0);
+ const exchangeTotal=ledger.assets.filter(a=>a.mode==='bybit'||a.mode==='aster').reduce((s,a)=>s+(a.value??0),0);
+ const pointsTotal=ledger.assets.filter(a=>a.kind.includes('积分')).reduce((s,a)=>s+(a.value??0),0);
  const rows=ledger.assets.filter(a=>filter==='all'||(filter==='manual'?a.mode==='manual':a.mode!=='manual')).sort((a,b)=>(b.value??0)-(a.value??0));
  const today=chinaDay(new Date(now));
  const measures=assetMeasures(total,embeddedWithdrawals(ledger.assets),ledger.withdrawals,today);
@@ -117,7 +119,19 @@ export default function Dashboard({initial}:{initial:Ledger}){
  {ledger.dataKind==='example'&&<div className="notice import-notice"><div><strong>当前为示例数据，尚未导入你的原表</strong><p>这里的资产和金额是演示内容。导入原表后才会显示你的真实持仓和历史。</p></div><button className="button primary" disabled={busy} onClick={()=>toggleImport(true)}>导入原表数据</button></div>}
  {error&&<div className="notice" role="alert">{error}。当前显示上次已保存的数据。</div>}
  {ledger.fxStatus.error&&<div className="notice" role="status">{ledger.fxStatus.error}，人民币折算暂用 1 USD = {money(ledger.fx,4)} CNY。</div>}
- {view==='overview'&&<><section className="summary"><div><div className="metric-label">表内总额 <span>USD · 原口径</span></div><div className="total-number">$ {money(total)}</div><p className="muted">折合人民币 ¥ {money(total*ledger.fx)} <button className="text-button" aria-label="人民币汇率详情与备用设置" onClick={()=>{setFx(String(ledger.fx));setFormError('');setFxOpen(true);}}><Pencil size={12}/></button></p><div className="fx-summary"><span className={'status '+(fxStale?'amber':'live')}>1 USD = {money(ledger.fx,4)} CNY · {ledger.fxStatus.error?'更新失败 · 保留旧值':fxStale?'待更新':ledger.fxStatus.source==='manual'?'临时手动':'自动更新'}</span><small>{fxSource}{ledger.fxStatus.rateDate?' · 报价日期 '+ledger.fxStatus.rateDate:' · 获取时间 '+stamp(ledger.fxStatus.fetchedAt)}</small></div></div><div className="secondary-metric"><div className="metric-label">交易所资产</div><strong>$ {money(ledger.assets.filter(a=>a.mode==='bybit'||a.mode==='aster').reduce((s,a)=>s+(a.value??0),0))}</strong><span className={'status '+(pending?'amber':'live')}>{pending?pending+' 个账户待连接':'只读账户已连接'}</span></div><div className="secondary-metric"><div className="metric-label">积分预估价值</div><strong>$ {money(ledger.assets.filter(a=>a.kind.includes('积分')).reduce((s,a)=>s+(a.value??0),0))}</strong><span className="muted">沿用表格估值，可手动编辑</span></div></section>
+ {view==='overview'&&<><section className="summary"><div><div className="metric-label">表内总额 <span>USD · 原口径</span></div><div className="total-number">$ {money(total)}</div><p className="muted">折合人民币 ¥ {money(total*ledger.fx)} <button className="text-button" aria-label="人民币汇率详情与备用设置" onClick={()=>{setFx(String(ledger.fx));setFormError('');setFxOpen(true);}}><Pencil size={12}/></button></p><div className="fx-summary"><span className={'status '+(fxStale?'amber':'live')}>1 USD = {money(ledger.fx,4)} CNY · {ledger.fxStatus.error?'更新失败 · 保留旧值':fxStale?'待更新':ledger.fxStatus.source==='manual'?'临时手动':'自动更新'}</span><small>{fxSource}{ledger.fxStatus.rateDate?' · 报价日期 '+ledger.fxStatus.rateDate:' · 获取时间 '+stamp(ledger.fxStatus.fetchedAt)}</small></div></div>
+ <div className="secondary-metric">
+  <div className="metric-label">交易所资产</div>
+  <strong>$ {money(exchangeTotal)}</strong>
+  <span className="muted">折合人民币 ¥ {money(exchangeTotal*ledger.fx)}</span>
+  <span className={'status '+(pending?'amber':'live')}>{pending?pending+' 个账户待连接':'只读账户已连接'}</span>
+ </div>
+ <div className="secondary-metric">
+  <div className="metric-label">积分预估价值</div>
+  <strong>$ {money(pointsTotal)}</strong>
+  <span className="muted">折合人民币 ¥ {money(pointsTotal*ledger.fx)}</span>
+  <span className="muted">沿用表格估值，可手动编辑</span>
+ </div></section>
  {failures.length>0&&<div className="notice" role="status">{failures.map(a=>a.project+'：'+a.error).join('；')}</div>}
  <section className="withdrawal-summary" aria-label="出金调整口径"><div><span>实际持有资产 / USD</span><strong>$ {money(measures.held)}</strong><p>表内总额减去原表“出金”</p></div><div className="adjusted-metric"><span>剔除出金影响 / USD</span><strong>$ {money(measures.adjusted)}</strong><p>实际持有资产 + 累计出金</p></div><div><span>累计出金 / USD</span><strong>$ {money(measures.withdrawn)}</strong><button className="text-button" onClick={()=>navigate('withdrawals')}>管理出金记录 <ArrowUpRight size={14}/></button></div></section>
  <div className="chart-grid"><AssetTrend ledger={ledger} today={today} onHistory={()=>navigate('history')}/>
