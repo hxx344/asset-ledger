@@ -12,3 +12,9 @@ export async function mapConcurrent<T, R>(items: readonly T[], limit: number, ru
   }));
   return results;
 }
+
+// Do not release the owner's sync lock while another independent branch is still writing.
+export async function settleIndependent(tasks: readonly (() => Promise<unknown>)[]): Promise<void> {
+  const results = await Promise.allSettled(tasks.map(task => Promise.resolve().then(task)));
+  for (const result of results) if (result.status === 'rejected') throw result.reason;
+}

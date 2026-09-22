@@ -1,6 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mapConcurrent } from '../lib/concurrency.ts';
+import { mapConcurrent, settleIndependent } from '../lib/concurrency.ts';
+
+test('a delayed FX branch does not delay account reads; failure waits for remaining writes before releasing the lock', async()=>{
+  let finishFx!:()=>void, finishAccount!:()=>void, accountStarted=false, complete=false;
+  const fx=new Promise<void>(resolve=>{finishFx=resolve;});
+  const account=new Promise<void>(resolve=>{finishAccount=resolve;});
+  const pending=settleIndependent([
+    async()=>{await Promise.resolve('prices');accountStarted=true;await account;},
+    async()=>{await fx;throw new Error('FX persistence failed');},
+  ]);
+  const rejected=assert.rejects(pending,/FX persistence failed/).then(()=>{complete=true;});
+  await new Promise(resolve=>setImmediate(resolve));assert.equal(accountStarted,true);
+  finishFx();await new Promise(resolve=>setImmediate(resolve));assert.equal(complete,false);
+  finishAccount();await rejected;assert.equal(complete,true);
+});
 
 test('account pool bounds simultaneous work, keeps ordering and isolates handled account failures', async () => {
   let running = 0, maximum = 0;

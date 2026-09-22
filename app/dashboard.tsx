@@ -14,14 +14,16 @@ import { WithdrawalsPanel } from './withdrawals-panel';
 import { AsterAccountsPanel } from './aster-accounts-panel';
 import { assetMeasures, embeddedWithdrawals, chinaDay, periodMeasures } from '@/lib/withdrawals';
 import { createHubBridge } from '@/lib/hub-bridge';
+import { requestJson, createRequestSlot } from '@/lib/client-request';
+import { nextLedgerExpiry } from '@/lib/client-freshness';
 
 const money=(n:number,d=2)=>n.toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
 const stamp=(s:string|null)=>s?new Date(s).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'尚未同步';
 const viewNames={overview:'资产总览',history:'历史记录',withdrawals:'出金记录',connections:'交易所连接'};
 type View=keyof typeof viewNames;
 async function api(path:string,method='GET',body?:unknown,signal?:AbortSignal):Promise<Ledger>{
- const r=await fetch(path,{method,headers:method==='GET'?{}:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store',signal});
- const data=await r.json() as Ledger & {error?:string};if(!r.ok)throw new Error(data.error||'请求失败，请稍后重试');return data;
+ const timeoutMs=path==='/api/sync'?75_000:['/api/connections','/api/aster-accounts'].includes(path)?60_000:30_000;
+ return requestJson<Ledger>(path,{method,headers:method==='GET'?{}:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),signal,timeoutMs});
 }
 function badge(a:Asset,now:number){
  if(a.mode!=='manual'&&a.status.includes('同步')&&!a.error&&now-new Date(a.updatedAt).getTime()>300000)return '数据已过期 · 保留旧值';
@@ -36,13 +38,14 @@ export default function Dashboard({initial}:{initial:Ledger}){
  const [connectTo,setConnectTo]=useState<'bybit'|null>(null),[key,setKey]=useState(''),[secret,setSecret]=useState(''),[region,setRegion]=useState('global');
  const [detail,setDetail]=useState<Asset|null>(null),[period,setPeriod]=useState<Period|null>(null),[periodRows,setPeriodRows]=useState<Asset[]>([]);
  const busyRef=useRef(false),importOpenRef=useRef(false);
- const bridgeRef=useRef<ReturnType<typeof createHubBridge>|null>(null),requestRef=useRef<AbortController|null>(null),historyRequestRef=useRef<AbortController|null>(null);
+ const bridgeRef=useRef<ReturnType<typeof createHubBridge>|null>(null),historyRequestRef=useRef<AbortController|null>(null);
+ const requests=useRef(createRequestSlot());
  const ledgerRef=useRef(initial),activeRef=useRef(false),mountedRef=useRef(false);
  const [importOpen,setImportOpen]=useState(false);
  function toggleImport(open:boolean){importOpenRef.current=open;setImportOpen(open);}
  const refresh=useCallback(async(manual=false)=>{
   if(busyRef.current||importOpenRef.current||(!manual&&!activeRef.current))return;busyRef.current=true;setBusy(true);
-  const controller=new AbortController();requestRef.current=controller;
+  const controller=requests.current.start(!manual);if(!controller){busyRef.current=false;setBusy(false);return;}
   try{
    const data=await api('/api/sync','POST',{},controller.signal);
    if(controller.signal.aborted||!mountedRef.current)return;
@@ -51,7 +54,7 @@ export default function Dashboard({initial}:{initial:Ledger}){
    ledgerRef.current=data;setLedger(data);setError('');if(changed)bridgeRef.current?.changed();if(manual)toast.success('已完成刷新，更新状态见资产明细');
   }
   catch(e){if(!controller.signal.aborted&&mountedRef.current)setError(e instanceof Error?e.message:'更新失败');}
-  finally{if(requestRef.current===controller){requestRef.current=null;busyRef.current=false;if(mountedRef.current){setBusy(false);setNow(Date.now());}}}
+  finally{if(requests.current.finish(controller)){busyRef.current=false;if(mountedRef.current){setBusy(false);setNow(Date.now());}}}
  },[]);
  useEffect(()=>{
   mountedRef.current=true;
@@ -59,13 +62,22 @@ export default function Dashboard({initial}:{initial:Ledger}){
   const update=()=>{
    const wasActive=activeRef.current;activeRef.current=!!bridgeRef.current?.active&&document.visibilityState==='visible'&&navigator.onLine;
    if(timer!==undefined){clearInterval(timer);timer=undefined;}
+   if(!activeRef.current&&requests.current.cancel(true)){busyRef.current=false;setBusy(false);}
    if(activeRef.current){if(!wasActive)void refresh();timer=setInterval(()=>void refresh(),60000);}
    setNow(Date.now());
   };
   const bridge=createHubBridge({onActivity:update,onNavigate:({projectId,query})=>{if(projectId==='asset'&&Object.keys(query).length===0){setView('overview');location.hash='overview';window.scrollTo({top:0});}}});bridgeRef.current=bridge;
   update();document.addEventListener('visibilitychange',update);window.addEventListener('online',update);window.addEventListener('offline',update);
-  return()=>{mountedRef.current=false;activeRef.current=false;bridge.dispose();bridgeRef.current=null;if(timer!==undefined)clearInterval(timer);document.removeEventListener('visibilitychange',update);window.removeEventListener('online',update);window.removeEventListener('offline',update);requestRef.current?.abort();requestRef.current=null;historyRequestRef.current?.abort();busyRef.current=false;};
+  const slot=requests.current;
+  return()=>{mountedRef.current=false;activeRef.current=false;bridge.dispose();bridgeRef.current=null;if(timer!==undefined)clearInterval(timer);document.removeEventListener('visibilitychange',update);window.removeEventListener('online',update);window.removeEventListener('offline',update);slot.cancel();historyRequestRef.current?.abort();busyRef.current=false;};
  },[refresh]);
+ useEffect(()=>{
+  if(document.hidden||!bridgeRef.current?.active)return;
+  const time=Date.now(),next=nextLedgerExpiry(ledger,time);
+  if(next===null)return;
+  const timer=setTimeout(()=>setNow(Date.now()),Math.min(next-time,2_147_483_647));
+  return()=>clearTimeout(timer);
+ },[ledger,now]);
  useEffect(()=>{
   const read=()=>{const v=location.hash.slice(1);if(v in viewNames)setView(v as View);};read();window.addEventListener('hashchange',read);return()=>window.removeEventListener('hashchange',read);
  },[]);
@@ -79,17 +91,17 @@ export default function Dashboard({initial}:{initial:Ledger}){
  function navigate(v:View){setView(v);if(window.location.hash!=='#'+v)window.history.pushState(null,'','#'+v);window.scrollTo({top:0});}
  async function mutate(path:string,method:string,body:unknown,onSuccess:()=>void){
   if(busyRef.current)return;busyRef.current=true;setBusy(true);setFormError('');
-  const controller=new AbortController();requestRef.current=controller;
+  const controller=requests.current.start();if(!controller){busyRef.current=false;setBusy(false);return;}
   try{const data=await api(path,method,body,controller.signal);if(controller.signal.aborted||!mountedRef.current)return;ledgerRef.current=data;setLedger(data);setError('');bridgeRef.current?.changed();onSuccess();toast.success('已保存');}
   catch(e){if(!controller.signal.aborted&&mountedRef.current)setFormError(e instanceof Error?e.message:'保存失败，输入已保留');}
-  finally{if(requestRef.current===controller){requestRef.current=null;busyRef.current=false;if(mountedRef.current)setBusy(false);}}
+  finally{if(requests.current.finish(controller)){busyRef.current=false;if(mountedRef.current){setBusy(false);setNow(Date.now());}}}
  }
  function edit(a:Asset){setEditing(a);setQuantity(String(a.quantity??0));setPrice(a.price===null?'':String(a.price));setFormError('');}
  function connection(exchange:'bybit'|'aster'){if(exchange==='aster'){navigate('connections');return;}setConnectTo(exchange);setKey('');setSecret('');setFormError('');}
  async function openPeriod(p:Period){
   historyRequestRef.current?.abort();const controller=new AbortController();historyRequestRef.current=controller;
   setPeriod(p);setPeriodRows([]);setFormError('');
-  try{const r=await fetch('/api/history?id='+encodeURIComponent(p.id),{cache:'no-store',signal:controller.signal});const data=await r.json() as {error?:string;rows:Asset[]};if(!r.ok)throw new Error(data.error);if(!controller.signal.aborted&&mountedRef.current)setPeriodRows(data.rows);}
+  try{const data=await requestJson<{rows:Asset[]}>('/api/history?id='+encodeURIComponent(p.id),{signal:controller.signal});if(!controller.signal.aborted&&mountedRef.current)setPeriodRows(data.rows);}
   catch(e){if(!controller.signal.aborted&&mountedRef.current)setFormError(e instanceof Error?e.message:'无法读取历史明细');}
  }
  const total=ledger.assets.reduce((s,a)=>s+(a.value??0),0);

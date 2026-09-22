@@ -7,7 +7,7 @@ import { editValue, type Credentials, type WithdrawalInput, type AsterAccountInp
 import { asterKey, readAsterAccounts, aggregateAster } from './aster-accounts';
 import { embeddedWithdrawals } from './withdrawals';
 import { yuanQuote } from './fx';
-import { mapConcurrent } from './concurrency';
+import { mapConcurrent, settleIndependent } from './concurrency';
 import type { Asset, Ledger, Connection, Period, Withdrawal, FxStatus, AsterAccount } from './types';
 
 export const chinaDate=()=>new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Shanghai'});
@@ -205,44 +205,48 @@ export async function refresh(owner:string){
     if(last&&Date.now()-Number(last.value)<30000)return getLedger(owner);
     await setting(owner,'last-attempt',String(Date.now()));
     const stored=await db().prepare('SELECT exchange,encrypted FROM connections WHERE owner = ?').bind(owner).all<{exchange:string,encrypted:string}>();
-    const [marketResult,fxResult]=await Promise.allSettled([quotes(),yuanQuote()]);
-    const prices=marketResult.status==='fulfilled'?marketResult.value:undefined;
-    const marketError=marketResult.status==='rejected'?(marketResult.reason instanceof Error?marketResult.reason.message:'无法获取行情'):undefined;
-    if(fxResult.status==='fulfilled')await saveFx(owner,fxResult.value.rate,fxResult.value.status);
-    else await setting(owner,'fx-status',{...ledger.fxStatus,error:'人民币汇率更新失败，保留上次汇率'});
-    const virtual=ledger.assets.find(a=>a.mode==='market')!;
-    if(prices){await saveAsset(owner,{...virtual,price:prices.VIRTUAL.price,value:(virtual.quantity??0)*prices.VIRTUAL.price,updatedAt:prices.VIRTUAL.at,status:prices.VIRTUAL.source+' · 实时单价',error:undefined});}
-    else await saveAsset(owner,{...virtual,status:'行情失败 · 保留旧值',error:marketError});
-    const bybitSync=async()=>Promise.all(stored.results.filter(row=>row.exchange==='bybit').map(async row=>{
-      const asset=ledger.assets.find(a=>a.mode==='bybit')!;
-      try{
-        if(!prices)throw new Error(marketError);
-        const c=await unseal(row.encrypted,owner+':'+row.exchange);
-        const result=await syncBybit(c,prices);
-        const now=new Date().toISOString();
-        await saveAsset(owner,{...asset,quantity:result.total,price:1,value:result.total,details:result.details,updatedAt:now,status:'只读同步',error:undefined});
-        await setting(owner,'bybit-status',{...ledger.connections.bybit,lastSync:now,error:null});
-      }catch(e){
-        const error=e instanceof Error?e.message:'同步暂时失败';
-        await saveAsset(owner,{...asset,status:'同步失败 · 保留旧值',error});
-        await setting(owner,'bybit-status',{...ledger.connections.bybit,error});
-      }
-    }));
-    const asterSync=async()=>{if(ledger.asterAccounts.length){
-      const accounts=await mapConcurrent(ledger.asterAccounts,3,async account=>{
-        const row=stored.results.find(r=>r.exchange===asterKey(account.id));
-        if(!row)return account;
+    await settleIndependent([async()=>{
+      const [marketResult]=await Promise.allSettled([quotes()]);
+      const prices=marketResult.status==='fulfilled'?marketResult.value:undefined;
+      const marketError=marketResult.status==='rejected'?(marketResult.reason instanceof Error?marketResult.reason.message:'无法获取行情'):undefined;
+      const virtual=ledger.assets.find(a=>a.mode==='market')!;
+      if(prices){await saveAsset(owner,{...virtual,price:prices.VIRTUAL.price,value:(virtual.quantity??0)*prices.VIRTUAL.price,updatedAt:prices.VIRTUAL.at,status:prices.VIRTUAL.source+' · 实时单价',error:undefined});}
+      else await saveAsset(owner,{...virtual,status:'行情失败 · 保留旧值',error:marketError});
+      const bybitSync=async()=>Promise.all(stored.results.filter(row=>row.exchange==='bybit').map(async row=>{
+        const asset=ledger.assets.find(a=>a.mode==='bybit')!;
         try{
           if(!prices)throw new Error(marketError);
-          const credentials=await unseal(row.encrypted,owner+':'+row.exchange);
-          const result=await syncAster(credentials,prices),now=new Date().toISOString();
-          return {...account,walletAddress:credentials.walletAddress,value:result.total,details:result.details,lastSync:now,updatedAt:now,error:null};
-        }catch(e){return {...account,error:e instanceof Error?e.message:'同步暂时失败'};}
-      });
-      await saveAsterAccounts(owner,accounts,ledger.assets.find(a=>a.mode==='aster')!);
-    }};
-    const completed=await Promise.allSettled([bybitSync(),asterSync()]);
-    for(const result of completed)if(result.status==='rejected')throw result.reason;
+          const c=await unseal(row.encrypted,owner+':'+row.exchange);
+          const result=await syncBybit(c,prices);
+          const now=new Date().toISOString();
+          await saveAsset(owner,{...asset,quantity:result.total,price:1,value:result.total,details:result.details,updatedAt:now,status:'只读同步',error:undefined});
+          await setting(owner,'bybit-status',{...ledger.connections.bybit,lastSync:now,error:null});
+        }catch(e){
+          const error=e instanceof Error?e.message:'同步暂时失败';
+          await saveAsset(owner,{...asset,status:'同步失败 · 保留旧值',error});
+          await setting(owner,'bybit-status',{...ledger.connections.bybit,error});
+        }
+      }));
+      const asterSync=async()=>{if(ledger.asterAccounts.length){
+        const accounts=await mapConcurrent(ledger.asterAccounts,3,async account=>{
+          const row=stored.results.find(r=>r.exchange===asterKey(account.id));
+          if(!row)return account;
+          try{
+            if(!prices)throw new Error(marketError);
+            const credentials=await unseal(row.encrypted,owner+':'+row.exchange);
+            const result=await syncAster(credentials,prices),now=new Date().toISOString();
+            return {...account,walletAddress:credentials.walletAddress,value:result.total,details:result.details,lastSync:now,updatedAt:now,error:null};
+          }catch(e){return {...account,error:e instanceof Error?e.message:'同步暂时失败'};}
+        });
+        await saveAsterAccounts(owner,accounts,ledger.assets.find(a=>a.mode==='aster')!);
+      }};
+      const completed=await Promise.allSettled([bybitSync(),asterSync()]);
+      for(const result of completed)if(result.status==='rejected')throw result.reason;
+    },async()=>{
+      const [fxResult]=await Promise.allSettled([yuanQuote()]);
+      if(fxResult.status==='fulfilled')await saveFx(owner,fxResult.value.rate,fxResult.value.status);
+      else await setting(owner,'fx-status',{...ledger.fxStatus,error:'人民币汇率更新失败，保留上次汇率'});
+    }]);
     await snapshot(owner);return getLedger(owner);
   }finally{await unlock(owner);}
 }

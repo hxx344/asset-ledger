@@ -8,13 +8,21 @@ const flag = name => existsSync(join(process.env.ASSET_DATA_DIR, name));
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input));
-  if (url.hostname === 'api.coinbase.com') return flag('fx-failure') ? new Response('', { status: 503 }) : Response.json({ data: { currency: 'USD', rates: { CNY: '7.1234', ...(flag('market-failure') ? {} : { VIRTUAL: '1', USDT: '1', USDC: '1' }) } } });
+  if (url.hostname === 'api.coinbase.com') {
+    if (flag('fx-ordering')) {
+      const deadline = Date.now() + 3000;
+      while (!flag('account-before-fx') && Date.now() < deadline) await delay(10);
+      assert.ok(flag('account-before-fx'), 'Account reads must start before the delayed FX result');
+    }
+    return flag('fx-failure') ? new Response('', { status: 503 }) : Response.json({ data: { currency: 'USD', rates: { CNY: '7.1234', ...(flag('market-failure') ? {} : { VIRTUAL: '1', USDT: '1', USDC: '1' }) } } });
+  }
   if (url.hostname === 'api.frankfurter.dev') return flag('fx-failure') ? new Response('', { status: 503 }) : Response.json({ base: 'USD', quote: 'CNY', rate: 7.11, date: new Date(Date.now() - 86400000).toISOString().slice(0, 10) });
   if (url.hostname === 'api.coingecko.com') return flag('market-failure') ? Response.json({}) : Response.json(Object.fromEntries(
     ['virtual-protocol', 'tether', 'usd-coin'].map(id => [id, { usd: 1, last_updated_at: Math.floor(Date.now() / 1000) }]),
   ));
   if (url.hostname === 'api.bybit.com') {
     if (url.pathname === '/v5/user/query-api') {
+      if (flag('fx-ordering')) writeFileSync(join(process.env.ASSET_DATA_DIR, 'account-before-fx'), 'fixture');
       // A serial Bybit -> Aster refresh cannot release this gate. This checks
       // actual provider overlap without relying on wall-clock speed assertions.
       if (flag('exchange-concurrency')) {

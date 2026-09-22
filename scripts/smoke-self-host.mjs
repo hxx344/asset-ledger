@@ -201,10 +201,17 @@ try {
   assert.equal(concurrent.connections.aster.error, null);
   rmSync(join(directory, 'exchange-concurrency'));
   rmSync(join(directory, 'aster-started'));
+  writeFileSync(join(directory, 'fx-ordering'), 'fixture');
+  const delayedFx = await forceSync();
+  assert.equal(delayedFx.fxStatus.source, 'Coinbase', 'The delayed FX quote must be released by an account read');
+  assert.equal(delayedFx.connections.bybit.error, null);
+  assert.ok(existsSync(join(directory, 'account-before-fx')));
+  rmSync(join(directory, 'fx-ordering'));
+  rmSync(join(directory, 'account-before-fx'));
   writeFileSync(join(directory, 'fx-failure'), 'fixture');
   const failedFx = await forceSync();
   assert.equal(failedFx.fx, 7.1234, 'Provider failure preserves the rate');
-  assert.equal(failedFx.fxStatus.fetchedAt, concurrent.fxStatus.fetchedAt, 'Failure cannot renew the quote timestamp');
+  assert.equal(failedFx.fxStatus.fetchedAt, delayedFx.fxStatus.fetchedAt, 'Failure cannot renew the quote timestamp');
   assert.match(failedFx.fxStatus.error, /保留上次汇率/);
   assert.equal(failedFx.connections.aster.error, null, 'FX failure does not block exchange updates');
   await stop(); await start();
