@@ -13,13 +13,14 @@ import { AssetTrend } from './asset-trend';
 import { WithdrawalsPanel } from './withdrawals-panel';
 import { AsterAccountsPanel } from './aster-accounts-panel';
 import { assetMeasures, embeddedWithdrawals, chinaDay, periodMeasures } from '@/lib/withdrawals';
+import { createHubBridge } from '@/lib/hub-bridge';
 
 const money=(n:number,d=2)=>n.toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
 const stamp=(s:string|null)=>s?new Date(s).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'尚未同步';
 const viewNames={overview:'资产总览',history:'历史记录',withdrawals:'出金记录',connections:'交易所连接'};
 type View=keyof typeof viewNames;
-async function api(path:string,method='GET',body?:unknown):Promise<Ledger>{
- const r=await fetch(path,{method,headers:method==='GET'?{}:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store'});
+async function api(path:string,method='GET',body?:unknown,signal?:AbortSignal):Promise<Ledger>{
+ const r=await fetch(path,{method,headers:method==='GET'?{}:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store',signal});
  const data=await r.json() as Ledger & {error?:string};if(!r.ok)throw new Error(data.error||'请求失败，请稍后重试');return data;
 }
 function badge(a:Asset,now:number){
@@ -29,24 +30,41 @@ function badge(a:Asset,now:number){
 }
 export default function Dashboard({initial}:{initial:Ledger}){
  const [ledger,setLedger]=useState(initial),[filter,setFilter]=useState('all'),[view,setView]=useState<View>('overview');
- const [busy,setBusy]=useState(false),[error,setError]=useState(''),[now,setNow]=useState(Date.now());
+ const [busy,setBusy]=useState(false),[error,setError]=useState(''),[now,setNow]=useState(()=>Date.now());
  const [editing,setEditing]=useState<Asset|null>(null),[quantity,setQuantity]=useState(''),[price,setPrice]=useState('');
  const [fxOpen,setFxOpen]=useState(false),[fx,setFx]=useState(String(initial.fx)),[formError,setFormError]=useState('');
  const [connectTo,setConnectTo]=useState<'bybit'|null>(null),[key,setKey]=useState(''),[secret,setSecret]=useState(''),[region,setRegion]=useState('global');
  const [detail,setDetail]=useState<Asset|null>(null),[period,setPeriod]=useState<Period|null>(null),[periodRows,setPeriodRows]=useState<Asset[]>([]);
  const busyRef=useRef(false),importOpenRef=useRef(false);
+ const bridgeRef=useRef<ReturnType<typeof createHubBridge>|null>(null),requestRef=useRef<AbortController|null>(null),historyRequestRef=useRef<AbortController|null>(null);
+ const ledgerRef=useRef(initial),activeRef=useRef(false),mountedRef=useRef(false);
  const [importOpen,setImportOpen]=useState(false);
  function toggleImport(open:boolean){importOpenRef.current=open;setImportOpen(open);}
  const refresh=useCallback(async(manual=false)=>{
-  if(busyRef.current||importOpenRef.current)return;busyRef.current=true;setBusy(true);
-  try{const data=await api('/api/sync','POST',{});setLedger(data);setError('');if(manual)toast.success('已完成刷新，更新状态见资产明细');}
-  catch(e){setError(e instanceof Error?e.message:'更新失败');}
-  finally{setBusy(false);busyRef.current=false;setNow(Date.now());}
+  if(busyRef.current||importOpenRef.current||(!manual&&!activeRef.current))return;busyRef.current=true;setBusy(true);
+  const controller=new AbortController();requestRef.current=controller;
+  try{
+   const data=await api('/api/sync','POST',{},controller.signal);
+   if(controller.signal.aborted||!mountedRef.current)return;
+   const previous=ledgerRef.current;
+   const changed=manual||JSON.stringify([previous.assets,previous.fx,previous.fxStatus,previous.withdrawals,previous.connections,previous.asterAccounts])!==JSON.stringify([data.assets,data.fx,data.fxStatus,data.withdrawals,data.connections,data.asterAccounts]);
+   ledgerRef.current=data;setLedger(data);setError('');if(changed)bridgeRef.current?.changed();if(manual)toast.success('已完成刷新，更新状态见资产明细');
+  }
+  catch(e){if(!controller.signal.aborted&&mountedRef.current)setError(e instanceof Error?e.message:'更新失败');}
+  finally{if(requestRef.current===controller){requestRef.current=null;busyRef.current=false;if(mountedRef.current){setBusy(false);setNow(Date.now());}}}
  },[]);
  useEffect(()=>{
-  const sync=()=>{if(document.visibilityState==='visible'&&navigator.onLine)void refresh();else setNow(Date.now());};
-  sync();const timer=setInterval(sync,60000);document.addEventListener('visibilitychange',sync);window.addEventListener('online',sync);
-  return()=>{clearInterval(timer);document.removeEventListener('visibilitychange',sync);window.removeEventListener('online',sync);};
+  mountedRef.current=true;
+  let timer:ReturnType<typeof setInterval>|undefined;
+  const update=()=>{
+   const wasActive=activeRef.current;activeRef.current=!!bridgeRef.current?.active&&document.visibilityState==='visible'&&navigator.onLine;
+   if(timer!==undefined){clearInterval(timer);timer=undefined;}
+   if(activeRef.current){if(!wasActive)void refresh();timer=setInterval(()=>void refresh(),60000);}
+   setNow(Date.now());
+  };
+  const bridge=createHubBridge({onActivity:update,onNavigate:({projectId,query})=>{if(projectId==='asset'&&Object.keys(query).length===0){setView('overview');location.hash='overview';window.scrollTo({top:0});}}});bridgeRef.current=bridge;
+  update();document.addEventListener('visibilitychange',update);window.addEventListener('online',update);window.addEventListener('offline',update);
+  return()=>{mountedRef.current=false;activeRef.current=false;bridge.dispose();bridgeRef.current=null;if(timer!==undefined)clearInterval(timer);document.removeEventListener('visibilitychange',update);window.removeEventListener('online',update);window.removeEventListener('offline',update);requestRef.current?.abort();requestRef.current=null;historyRequestRef.current?.abort();busyRef.current=false;};
  },[refresh]);
  useEffect(()=>{
   const read=()=>{const v=location.hash.slice(1);if(v in viewNames)setView(v as View);};read();window.addEventListener('hashchange',read);return()=>window.removeEventListener('hashchange',read);
@@ -58,19 +76,21 @@ export default function Dashboard({initial}:{initial:Ledger}){
   Promise.resolve(context.registerTool({name:'read_asset_ledger',description:'读取当前资产估值、单价、来源及更新时间，不进行同步或修改。',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true,untrustedContentHint:false},execute:(input:unknown)=>{if(!input||typeof input!=='object'||Object.keys(input).length)throw new Error('无需参数');return {assets:ledger.assets,fx:ledger.fx,baselineDate:ledger.baselineDate};}},{signal:lifecycle.signal})).catch(()=>{});
   return()=>lifecycle.abort();
  },[ledger]);
- function navigate(v:View){setView(v);location.hash=v;window.scrollTo({top:0});}
+ function navigate(v:View){setView(v);if(window.location.hash!=='#'+v)window.history.pushState(null,'','#'+v);window.scrollTo({top:0});}
  async function mutate(path:string,method:string,body:unknown,onSuccess:()=>void){
   if(busyRef.current)return;busyRef.current=true;setBusy(true);setFormError('');
-  try{setLedger(await api(path,method,body));setError('');onSuccess();toast.success('已保存');}
-  catch(e){setFormError(e instanceof Error?e.message:'保存失败，输入已保留');}
-  finally{busyRef.current=false;setBusy(false);}
+  const controller=new AbortController();requestRef.current=controller;
+  try{const data=await api(path,method,body,controller.signal);if(controller.signal.aborted||!mountedRef.current)return;ledgerRef.current=data;setLedger(data);setError('');bridgeRef.current?.changed();onSuccess();toast.success('已保存');}
+  catch(e){if(!controller.signal.aborted&&mountedRef.current)setFormError(e instanceof Error?e.message:'保存失败，输入已保留');}
+  finally{if(requestRef.current===controller){requestRef.current=null;busyRef.current=false;if(mountedRef.current)setBusy(false);}}
  }
  function edit(a:Asset){setEditing(a);setQuantity(String(a.quantity??0));setPrice(a.price===null?'':String(a.price));setFormError('');}
  function connection(exchange:'bybit'|'aster'){if(exchange==='aster'){navigate('connections');return;}setConnectTo(exchange);setKey('');setSecret('');setFormError('');}
  async function openPeriod(p:Period){
+  historyRequestRef.current?.abort();const controller=new AbortController();historyRequestRef.current=controller;
   setPeriod(p);setPeriodRows([]);setFormError('');
-  try{const r=await fetch('/api/history?id='+encodeURIComponent(p.id),{cache:'no-store'});const data=await r.json() as {error?:string;rows:Asset[]};if(!r.ok)throw new Error(data.error);setPeriodRows(data.rows);}
-  catch(e){setFormError(e instanceof Error?e.message:'无法读取历史明细');}
+  try{const r=await fetch('/api/history?id='+encodeURIComponent(p.id),{cache:'no-store',signal:controller.signal});const data=await r.json() as {error?:string;rows:Asset[]};if(!r.ok)throw new Error(data.error);if(!controller.signal.aborted&&mountedRef.current)setPeriodRows(data.rows);}
+  catch(e){if(!controller.signal.aborted&&mountedRef.current)setFormError(e instanceof Error?e.message:'无法读取历史明细');}
  }
  const total=ledger.assets.reduce((s,a)=>s+(a.value??0),0);
  const rows=ledger.assets.filter(a=>filter==='all'||(filter==='manual'?a.mode==='manual':a.mode!=='manual')).sort((a,b)=>(b.value??0)-(a.value??0));
@@ -112,6 +132,6 @@ export default function Dashboard({initial}:{initial:Ledger}){
  <Dialog open={!!connectTo} onOpenChange={v=>{if(!v){setConnectTo(null);setSecret('');setKey('');}}}><DialogContent><DialogHeader><DialogTitle>连接 Bybit</DialogTitle><DialogDescription>验证只读权限与余额，成功后加密保存。</DialogDescription></DialogHeader><form className="form-grid" onSubmit={e=>{e.preventDefault();void mutate('/api/connections','POST',{exchange:'bybit',apiKey:key.trim(),apiSecret:secret.trim(),region},()=>{setConnectTo(null);setKey('');setSecret('');});}}><label>API Key<input autoComplete="off" spellCheck={false} autoCapitalize="none" required value={key} onChange={e=>setKey(e.target.value)}/></label><label>API Secret<input type="password" autoComplete="new-password" spellCheck={false} autoCapitalize="none" required value={secret} onChange={e=>setSecret(e.target.value)}/></label><label>账户地区<Select value={region} onValueChange={setRegion}><SelectTrigger aria-label="账户地区"><SelectValue/></SelectTrigger><SelectContent>{[['global','国际站'],['nl','荷兰'],['tr','土耳其'],['kz','哈萨克斯坦'],['ge','格鲁吉亚'],['ae','阿联酋'],['eu','欧洲']].map(([v,l])=><SelectItem key={v} value={v}>{l}</SelectItem>)}</SelectContent></Select></label><p className="help">HMAC 类型只读 API，需要账户与资产读取权限；不读取子账户及理财产品。</p>{formError&&<p className="error-text" role="alert">{formError}</p>}<div className="form-actions">{ledger.connections.bybit.configured&&<button type="button" className="button" disabled={busy} onClick={()=>void mutate('/api/connections','DELETE',{exchange:'bybit'},()=>{setConnectTo(null);setKey('');setSecret('');})}>断开并保留估值</button>}<button className="button primary" disabled={busy}>{busy?'验证中…':'验证并连接'}</button></div></form></DialogContent></Dialog>
  <Dialog open={!!detail} onOpenChange={v=>!v&&setDetail(null)}><DialogContent className="detail-dialog"><DialogHeader><DialogTitle>{detail?.project} 账户明细</DialogTitle><DialogDescription>最近同步 {stamp(detail?.updatedAt??null)} · 美元净权益</DialogDescription></DialogHeader><div className="holdings"><Table><TableHeader><TableRow><TableHead>账户 / 币种</TableHead><TableHead className="numeric">数量</TableHead><TableHead className="numeric">美元价值</TableHead></TableRow></TableHeader><TableBody>{detail?.details?.map((b,i)=><TableRow key={i}><TableCell>{b.account}<small className="ticker">{b.coin}</small></TableCell><TableCell className="numeric">{money(b.quantity,6)}</TableCell><TableCell className="numeric">{money(b.value)}</TableCell></TableRow>)}</TableBody></Table></div><p className="help">账户合计采用交易所净权益。币种行仅供核对，不将保证金和持仓名义价值再次计入。</p></DialogContent></Dialog>
  <Dialog open={!!period} onOpenChange={v=>!v&&setPeriod(null)}><DialogContent className="detail-dialog"><DialogHeader><DialogTitle>{period?.date} 资产快照</DialogTitle><DialogDescription>{period?.archived?'导入前示例记录':period?.future?'原表预填记录':period?.id.startsWith('daily-')?'当日最近一次已保存数据':'原表 '+period?.id} · 总额 $ {money(period?.total??0)}</DialogDescription></DialogHeader>{period?.difference!==0&&<p className="notice">行估值之和与原合计相差 $ {money(period?.difference??0)}。保留原合计，未修改历史。</p>}{formError?<p className="error-text">{formError}</p>:periodRows.length?<div className="holdings">{renderTable(periodRows,false)}</div>:<p className="help">读取快照…</p>}</DialogContent></Dialog>
- <ImportLedgerDialog open={importOpen} onOpenChange={toggleImport} onImported={data=>{setLedger(data);setError('');setNow(Date.now());}}/>
+ <ImportLedgerDialog open={importOpen} onOpenChange={toggleImport} onImported={data=>{ledgerRef.current=data;setLedger(data);setError('');setNow(Date.now());bridgeRef.current?.changed();}}/>
  <Toaster position="bottom-right" richColors/></div>;
 }

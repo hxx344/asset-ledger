@@ -15,14 +15,14 @@ export function readSource(): SourceLedger {
   }
   return example;
 }
-export function seedLedger(raw: SourceLedger = readSource()): Ledger {
+export function seedLedger(raw: SourceLedger = readSource(), includeHistory = true): Ledger {
   const base = raw.periods.find(p => p.id === raw.baselineId)!;
   return {
     asterAccounts: [],
     fxStatus: { source: 'saved', fetchedAt: null, rateDate: null, error: null },
     dataKind: raw.source === EXAMPLE_SOURCE ? 'example' : 'personal',
     assets: base.rows.map(row => ({...row, mode: row.project === 'virtual' ? 'market' : row.project === 'bybit' ? 'bybit' : row.project === 'aster' ? 'aster' : 'manual', updatedAt: base.date + 'T00:00:00+08:00', status: row.project === 'virtual' ? '待更新行情' : ['bybit','aster'].includes(row.project) ? '待连接 · 表格值' : '手动估值' } as Asset)),
-    history: raw.periods.map(({rows,...period}) => ({...period, withdrawn: embeddedWithdrawals(rows)})), withdrawals: [], fx: raw.fx, baselineDate: raw.baselineDate, startedAt: raw.startedAt, baselineTotal: base.total,
+    history: includeHistory ? raw.periods.map(({rows,...period}) => ({...period, withdrawn: embeddedWithdrawals(rows)})) : [], withdrawals: [], fx: raw.fx, baselineDate: raw.baselineDate, startedAt: raw.startedAt, baselineTotal: base.total,
     connections: { bybit: {configured:false,lastSync:null,error:null,scope:'统一账户 + 资金账户'}, aster: {configured:false,lastSync:null,error:null,scope:'合约账户'} }
   };
 }
