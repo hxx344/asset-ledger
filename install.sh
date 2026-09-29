@@ -15,7 +15,61 @@ BACKUP_KEEP=7
 CLEANUP_ONLY=0
 RELEASE='' NEW_RELEASE='' PREVIOUS='' BACKUP='' DOWNLOAD='' SWITCHED=0 WAS_ACTIVE=0
 CURRENT='' RUNNING='' SOURCE_DIR='' KEEP_RELEASE=''
-MOUNT_TARGETS=''
+MOUNT_TARGETS='' BUILD_CACHE='' ARTIFACT_COMMIT=''
+
+# Increment only when the produced release format changes, not for installer edits.
+BUILD_RECIPE=asset-standalone-v2
+atomic_stamp() {
+  local target=$1 value=$2 temporary
+  temporary=$(mktemp "${target}.XXXXXX")
+  printf '%s\n' "$value" > "$temporary"
+  chmod 0640 "$temporary"
+  mv -f -- "$temporary" "$target"
+}
+build_environment_key() {
+  # Match the actual build account/environment, but ignore invocation-only context.
+  # Only the digest is persisted; environment values (including secrets) stay private.
+  as_app node --input-type=module -e '
+    import { createHash } from "node:crypto";
+    const context = new Set(["PWD", "OLDPWD", "SHLVL", "_", "SUDO_COMMAND", "SUDO_USER", "SUDO_UID", "SUDO_GID", "TERM", "COLORTERM"]);
+    const values = Object.entries(process.env).filter(([key]) => !context.has(key)).sort(([a], [b]) => a.localeCompare(b));
+    console.log(createHash("sha256").update(JSON.stringify(values)).digest("hex"));'
+}
+calculate_keys() {
+  local environment_key=$1 configuration_key
+  dependency_key=$({
+    printf '%s\n' "$NODE_DIST" "$(node --version)" "$(npm --version)"
+    git --git-dir="$APP_ROOT/source.git" ls-tree -r "$COMMIT" -- package.json package-lock.json .npmrc scripts/prepare-ledger.mjs
+  } | sha256sum | cut -d' ' -f1)
+  configuration_key=$(git --git-dir="$APP_ROOT/source.git" ls-tree -r "$COMMIT" | awk -F '\t' '$2 ~ /^(next|postcss|tailwind)\.config\./ || $2 ~ /^tsconfig/ || $2 ~ /^\.env/' | sha256sum | cut -d' ' -f1)
+  # Default to including tracked inputs, including future source folders and build
+  # configuration. Only known non-runtime paths are excluded.
+  source_key=$({
+    printf '%s\n' "$BUILD_RECIPE" "$dependency_key" "$environment_key"
+    git --git-dir="$APP_ROOT/source.git" ls-tree -r "$COMMIT" | awk -F '\t' '$2 != "README.md" && $2 != "install.sh" && $2 !~ /^(docs|tests|\.github)\//'
+  } | sha256sum | cut -d' ' -f1)
+  cache_key=$(printf '%s\n' "$BUILD_RECIPE" "$dependency_key" "$configuration_key" "$environment_key" | sha256sum | cut -d' ' -f1)
+}
+dependency_sizes() {
+  local path=$1 expected=$2 key kb inodes extra
+  [[ -f $path/.install-dependency-sizes ]] || return 1
+  read -r key kb inodes extra < "$path/.install-dependency-sizes" || return 1
+  [[ $key == "$expected" && $kb =~ ^[1-9][0-9]*$ && $inodes =~ ^[1-9][0-9]*$ && -z $extra ]] || return 1
+  DEPENDENCY_KB=$kb DEPENDENCY_INODES=$inodes
+}
+prepare_build_cache() {
+  local root=$APP_ROOT/build-cache
+  [[ ! -L $root ]] || die '构建缓存根目录不应为符号链接。'
+  install -d -m 0755 "$root"
+  BUILD_CACHE=$root/$cache_key
+  [[ ! -L $BUILD_CACHE && ( ! -e $BUILD_CACHE || -d $BUILD_CACHE ) ]] || die '构建缓存路径无效。'
+  [[ $(realpath -m -- "$BUILD_CACHE") == "$BUILD_CACHE" ]] || die '构建缓存路径无效。'
+  install -d -m 0750 -o "$APP_USER" -g "$APP_USER" "$BUILD_CACHE"
+  touch "$BUILD_CACHE/.install-cache"
+  as_app mkdir -p "$RELEASE/.next"
+  as_app ln -s "$BUILD_CACHE" "$RELEASE/.next/cache"
+  printf 'Next 构建缓存：%s（按依赖、运行时、配置和环境分区）。\n' "$cache_key"
+}
 
 read_mounts() {
   MOUNT_TARGETS=$(findmnt --raw --noheadings --output TARGET) || die '无法确认挂载点，已停止清理。'
@@ -143,6 +197,13 @@ reclaim_caches() {
     protects_path "$path" && continue
     rm -rf --one-file-system -- "$path"
   done
+  for path in "$APP_ROOT/build-cache/"*; do
+    [[ ${path##*/} =~ ^[a-f0-9]{64}$ && -d $path && ! -L $path && -f $path/.install-cache && $path != "$BUILD_CACHE" ]] || continue
+    [[ $(realpath -- "$path") == "$path" ]] || continue
+    contains_mount "$path" && continue
+    protects_path "$path" && continue
+    rm -rf --one-file-system -- "$path"
+  done
 }
 storage_stats() {
   local path=$1
@@ -160,13 +221,12 @@ require_space() {
 }
 check_build_space() {
   local kb=1048576 inodes=100000 build_kb=524288 value
-  if [[ -n $PREVIOUS && -d $PREVIOUS/node_modules ]]; then
-    kb=$(du -sk -- "$PREVIOUS/node_modules" | awk '{print $1}')
-    inodes=$(du --inodes -s -- "$PREVIOUS/node_modules" | awk '{print $1}')
+  if [[ -n $PREVIOUS ]] && dependency_sizes "$PREVIOUS" "$dependency_key"; then
+    kb=$DEPENDENCY_KB inodes=$DEPENDENCY_INODES
   fi
-  if [[ -n $PREVIOUS && -d $PREVIOUS/.next ]]; then
-    value=$(du -sk --exclude=cache -- "$PREVIOUS/.next" | awk '{print $1}')
-    ((value <= build_kb)) || build_kb=$value
+  if [[ -n $PREVIOUS && -f $PREVIOUS/.install-build-kb ]]; then
+    value=$(cat "$PREVIOUS/.install-build-kb")
+    if [[ $value =~ ^[1-9][0-9]*$ ]] && ((value > build_kb)); then build_kb=$value; fi
   fi
   require_space "$APP_ROOT/releases" "$((kb + build_kb + 786432))" "$((inodes + 25000))"
   require_space "$DATA_DIR" 524288 5000
@@ -187,7 +247,39 @@ probe_running() {
   [[ $(systemctl show --property=NeedDaemonReload --value asset-ledger.service) == no ]] || return 1
   pid=$(systemctl show --property=MainPID --value asset-ledger.service)
   [[ $pid =~ ^[1-9][0-9]*$ && $(readlink -f "/proc/$pid/cwd") == "$RELEASE/.next/standalone" ]] || return 1
-  curl --fail --silent --max-time 3 "http://127.0.0.1:$PORT/api/health" | grep -Fq "\"release\":\"$COMMIT\""
+  curl --fail --silent --max-time 3 "http://127.0.0.1:$PORT/api/health" | grep -Fq "\"release\":\"$ARTIFACT_COMMIT\""
+}
+service_unit() {
+cat <<UNIT
+[Unit]
+Description=Personal Asset Ledger
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$APP_USER
+Group=$APP_USER
+WorkingDirectory=$APP_ROOT/current/.next/standalone
+Environment=NODE_ENV=production
+Environment=NEXT_TELEMETRY_DISABLED=1
+Environment=ASSET_DATA_DIR=$DATA_DIR
+Environment=HOSTNAME=$BIND
+Environment=PORT=$PORT
+Environment=ASSET_RELEASE=$ARTIFACT_COMMIT
+ExecStart=$NODE_HOME/bin/node $APP_ROOT/current/.next/standalone/server.js
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=$DATA_DIR
+
+[Install]
+WantedBy=multi-user.target
+UNIT
 }
 rollback() {
   systemctl stop asset-ledger || return 1
@@ -232,7 +324,7 @@ HELP
 }
 die() { printf '错误：%s\n' "$*" >&2; exit 1; }
 main() {
-local old_port old_bind package missing=0 reused=0 dependency_key source_key
+local old_port old_bind package missing=0 reused=0 built=0 dependency_key source_key cache_key unit_key
 while (($#)); do
   case "$1" in
     --port) (($# >= 2)) || die '--port 缺少参数'; PORT_ARG=$2; shift 2 ;;
@@ -281,9 +373,11 @@ PREVIOUS=$(readlink -f "$APP_ROOT/current" 2>/dev/null || true)
 trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-read_mounts
-prune_releases
-prune_backups
+if ((CLEANUP_ONLY)) || [[ -n $BACKUP_KEEP_ARG ]]; then
+  read_mounts
+  prune_releases
+  prune_backups
+fi
 if [[ -n $BACKUP_KEEP_ARG ]]; then printf '%s\n' "$BACKUP_KEEP" > "$APP_ROOT/backup-keep"; chmod 0600 "$APP_ROOT/backup-keep"; fi
 if ((CLEANUP_ONLY)); then
   reclaim_caches
@@ -326,29 +420,36 @@ fi
 [[ $(git --git-dir="$APP_ROOT/source.git" remote get-url origin) == "$REPO_URL" ]] || die '源码仓库地址不匹配。'
 git --git-dir="$APP_ROOT/source.git" fetch --prune origin main
 COMMIT=$(git --git-dir="$APP_ROOT/source.git" rev-parse --verify 'FETCH_HEAD^{commit}')
-source_key=$(printf '%s\n%s\n%s\n' "$COMMIT" "$NODE_DIST" "$(declare -f)" | sha256sum | cut -d' ' -f1)
 as_app() { runuser -u "$APP_USER" -- env PATH="$PATH" HOME="$DATA_DIR" NEXT_TELEMETRY_DISABLED=1 ASSET_DATA_DIR="$DATA_DIR" "$@"; }
-if [[ -n $PREVIOUS && -f $PREVIOUS/.install-source && $(cat "$PREVIOUS/.install-source") == "$source_key" ]] && ready_release "$PREVIOUS"; then
+calculate_keys "$(build_environment_key)"
+ARTIFACT_COMMIT=$COMMIT
+if [[ -n $PREVIOUS && -f $PREVIOUS/.install-build && $(cat "$PREVIOUS/.install-build") == "$source_key" && -f $PREVIOUS/.install-artifact-commit ]] && ready_release "$PREVIOUS"; then
   RELEASE=$PREVIOUS
-  if [[ $PORT == "$old_port" && $BIND == "$old_bind" && -f $RELEASE/.install-unit && -f /etc/systemd/system/asset-ledger.service && $(cat "$RELEASE/.install-unit") == "$(digest /etc/systemd/system/asset-ledger.service)" ]] && probe_running; then
+  ARTIFACT_COMMIT=$(cat "$RELEASE/.install-artifact-commit")
+  [[ $ARTIFACT_COMMIT =~ ^[a-f0-9]{40}$ ]] || die '运行产物版本标记无效。'
+  unit_key=$(service_unit | sha256sum | cut -d' ' -f1)
+  if [[ $PORT == "$old_port" && $BIND == "$old_bind" && -f /etc/systemd/system/asset-ledger.service && $unit_key == "$(digest /etc/systemd/system/asset-ledger.service)" ]] && probe_running; then
     systemctl is-enabled --quiet asset-ledger || systemctl enable asset-ledger
-    printf '版本、环境和配置未变，服务健康；已跳过依赖安装、构建、备份和重启。\n'
+    printf '应用、环境和配置未变，服务健康；已跳过依赖安装、构建、备份和重启。运行产物：%s；已检查源码：%s。\n' "${ARTIFACT_COMMIT:0:12}" "${COMMIT:0:12}"
     return
   fi
   printf '版本未变，复用已验证构建，仅应用配置或恢复服务。\n'
 else
+read_mounts
+prune_releases
+prune_backups
 check_build_space
 RELEASE=$(mktemp -d "$APP_ROOT/releases/${COMMIT:0:12}.XXXXXX")
 NEW_RELEASE=$RELEASE
 touch "$RELEASE/.install-owned"
-git --git-dir="$APP_ROOT/source.git" archive "$COMMIT" | tar -x -C "$RELEASE"
-dependency_key=$({ printf '%s\n' "$NODE_DIST" "$(node --version)" "$(npm --version)"; for package in package.json package-lock.json .npmrc scripts/prepare-ledger.mjs; do [[ ! -f $RELEASE/$package ]] || sha256sum "$RELEASE/$package" | awk -v file="$package" '{print file ":" $1}'; done; } | sha256sum | cut -d' ' -f1)
+chown "$APP_USER:$APP_USER" "$RELEASE"
+git --git-dir="$APP_ROOT/source.git" archive "$COMMIT" | as_app tar -x --no-same-owner -C "$RELEASE"
 if [[ -n $PREVIOUS && -f $PREVIOUS/.install-dependencies && $(cat "$PREVIOUS/.install-dependencies") == "$dependency_key" && -f $PREVIOUS/node_modules/.package-lock.json && -x $PREVIOUS/node_modules/.bin/next && ! -L $PREVIOUS/node_modules ]]; then
-  cp -a --reflink=auto "$PREVIOUS/node_modules" "$RELEASE/node_modules"
+  as_app cp -a --no-preserve=ownership --reflink=auto "$PREVIOUS/node_modules" "$RELEASE/node_modules"
   reused=1
   printf '依赖未变，复用独立副本。\n'
 fi
-chown -R "$APP_USER:$APP_USER" "$RELEASE"
+prepare_build_cache
 printf '正在安装依赖并构建 %s…\n' "${COMMIT:0:12}"
 (cd "$RELEASE"; if ((reused)); then as_app npm run prepare; else as_app npm ci --include=dev --prefer-offline --no-audit --no-fund; fi; as_app npm run build)
 RUNTIME_APP="$RELEASE/.next/standalone"
@@ -358,9 +459,9 @@ cp -a "$RELEASE/public" "$RUNTIME_APP/public"
 install -d "$RUNTIME_APP/drizzle"
 cp -a "$RELEASE/drizzle/." "$RUNTIME_APP/drizzle/"
 # The service account can write data, but cannot alter code used by privileged upgrade steps.
-chown -R "root:$APP_USER" "$RELEASE"
-chmod -R u=rwX,g=rX,o= "$RELEASE"
-printf '%s\n' "$dependency_key" > "$RELEASE/.install-dependencies"
+# One traversal; do not follow the shared build-cache or package symlinks.
+find "$RELEASE" -xdev -exec chown -h "root:$APP_USER" {} + ! -type l -exec chmod u=rwX,g=rX,o= {} +
+built=1
 fi
 if [[ -n $DATA_FILE ]]; then
   case "$DATA_FILE" in
@@ -392,38 +493,14 @@ touch "$BACKUP/.install-complete"
 printf 'PORT=%s\nBIND=%s\n' "$PORT" "$BIND" > "$APP_ROOT/deploy.env"
 chmod 0600 "$APP_ROOT/deploy.env"
 ln -sfn "$RELEASE" "$APP_ROOT/current"
-cat > /etc/systemd/system/asset-ledger.service <<UNIT
-[Unit]
-Description=Personal Asset Ledger
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=$APP_USER
-Group=$APP_USER
-WorkingDirectory=$APP_ROOT/current/.next/standalone
-Environment=NODE_ENV=production
-Environment=NEXT_TELEMETRY_DISABLED=1
-Environment=ASSET_DATA_DIR=$DATA_DIR
-Environment=HOSTNAME=$BIND
-Environment=PORT=$PORT
-Environment=ASSET_RELEASE=$COMMIT
-ExecStart=$NODE_HOME/bin/node $APP_ROOT/current/.next/standalone/server.js
-Restart=on-failure
-RestartSec=5
-UMask=0077
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=$DATA_DIR
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-systemctl daemon-reload
-systemctl enable asset-ledger
+unit_key=$(service_unit | sha256sum | cut -d' ' -f1)
+if [[ ! -f /etc/systemd/system/asset-ledger.service || $unit_key != "$(digest /etc/systemd/system/asset-ledger.service)" ]]; then
+  service_unit > /etc/systemd/system/asset-ledger.service
+  systemctl daemon-reload
+elif [[ $(systemctl show --property=NeedDaemonReload --value asset-ledger.service) != no ]]; then
+  systemctl daemon-reload
+fi
+systemctl is-enabled --quiet asset-ledger || systemctl enable asset-ledger
 systemctl restart asset-ledger
 HEALTHY=0
 for ((attempt=0; attempt<30; attempt++)); do
@@ -431,16 +508,27 @@ for ((attempt=0; attempt<30; attempt++)); do
   sleep 2
 done
 ((HEALTHY)) || die '新服务未通过健康检查。'
-printf '%s\n' "$source_key" > "$RELEASE/.install-source"
-printf '%s\n' "${BACKUP##*/}" > "$RELEASE/.install-rollback-backup"
-digest /etc/systemd/system/asset-ledger.service > "$RELEASE/.install-unit"
-touch "$RELEASE/.install-ready"
+if ((built)); then
+  if ! ((reused)) || ! dependency_sizes "$PREVIOUS" "$dependency_key"; then
+    DEPENDENCY_KB=$(du -sk -- "$RELEASE/node_modules" | awk '{print $1}')
+    DEPENDENCY_INODES=$(du --inodes -s -- "$RELEASE/node_modules" | awk '{print $1}')
+  fi
+  atomic_stamp "$RELEASE/.install-dependency-sizes" "$dependency_key $DEPENDENCY_KB $DEPENDENCY_INODES"
+  atomic_stamp "$RELEASE/.install-build-kb" "$(du -sk --exclude=cache -- "$RELEASE/.next" | awk '{print $1}')"
+  atomic_stamp "$RELEASE/.install-dependencies" "$dependency_key"
+  atomic_stamp "$RELEASE/.install-build-cache" "$cache_key"
+  atomic_stamp "$RELEASE/.install-artifact-commit" "$ARTIFACT_COMMIT"
+  atomic_stamp "$RELEASE/.install-build" "$source_key"
+fi
+atomic_stamp "$RELEASE/.install-rollback-backup" "${BACKUP##*/}"
+atomic_stamp "$RELEASE/.install-unit" "$(digest /etc/systemd/system/asset-ledger.service)"
+atomic_stamp "$RELEASE/.install-ready" ready
 SWITCHED=0
 NEW_RELEASE=''
 read_mounts
 prune_releases
 prune_backups
-printf '\n部署成功，提交：%s\n数据目录：%s\n备份目录：%s\n管理：systemctl status asset-ledger\n重复执行同一命令即可升级。\n' "${COMMIT:0:12}" "$DATA_DIR" "$BACKUP"
+printf '\n部署成功，运行产物：%s；已检查源码：%s\n数据目录：%s\n备份目录：%s\n管理：systemctl status asset-ledger\n重复执行同一命令即可升级。\n' "${ARTIFACT_COMMIT:0:12}" "${COMMIT:0:12}" "$DATA_DIR" "$BACKUP"
 if [[ $BIND == 127.0.0.1 ]]; then
   printf '当前仅监听服务器本机 127.0.0.1:%s，无需对公网开放此端口。\n' "$PORT"
   printf '在自己的电脑上执行（替换用户名和服务器 IP）：\n'

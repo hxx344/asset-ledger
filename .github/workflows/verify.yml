@@ -25,6 +25,7 @@ jobs:
       - run: npm run test:smoke
       - run: bash -n install.sh
       - run: bash tests/install-storage.sh
+      - run: bash tests/install-incremental.sh
   installer:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04

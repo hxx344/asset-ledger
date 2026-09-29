@@ -85,6 +85,17 @@ assert_exists "$CURRENT/.next/cache/images"
 assert_exists "$DATA_DIR/ledger.sqlite"
 assert_exists "$DATA_DIR/config.json"
 assert_exists "$DATA_DIR/backups/keep.sqlite"
+# Only managed cache partitions are reclaimable; an active build keeps its cache.
+cache_old=$(printf 'a%.0s' {1..64})
+cache_active=$(printf 'b%.0s' {1..64})
+mkdir -p "$APP_ROOT/build-cache/$cache_old" "$APP_ROOT/build-cache/$cache_active" "$APP_ROOT/build-cache/custom"
+touch "$APP_ROOT/build-cache/$cache_old/.install-cache" "$APP_ROOT/build-cache/$cache_active/.install-cache"
+BUILD_CACHE=$APP_ROOT/build-cache/$cache_active
+reclaim_caches
+assert_absent "$APP_ROOT/build-cache/$cache_old"
+assert_exists "$BUILD_CACHE"
+assert_exists "$APP_ROOT/build-cache/custom"
+BUILD_CACHE=''
 if [[ $(uname -s) == Linux ]]; then
   mkdir -p "$FIXTURE/external"
   touch "$FIXTURE/external/keep"
