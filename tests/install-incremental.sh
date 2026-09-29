@@ -35,6 +35,12 @@ next_revision() {
 }
 COMMIT=$(git -C "$FIXTURE/source" rev-parse HEAD)
 environment=$(build_environment_key)
+session_one=$(export SSH_CLIENT='192.0.2.1 12345 22' SSH_CONNECTION='192.0.2.1 12345 192.0.2.2 22' SSH_TTY=/dev/pts/1 XDG_SESSION_ID=12 LS_COLORS='di=01;34'; build_environment_key)
+session_two=$(export SSH_CLIENT='192.0.2.3 23456 22' SSH_CONNECTION='192.0.2.3 23456 192.0.2.2 22' SSH_TTY=/dev/pts/2 XDG_SESSION_ID=24 LS_COLORS='di=01;35'; build_environment_key)
+[[ $session_one == "$environment" && $session_two == "$environment" ]]
+public_environment=$(export NEXT_PUBLIC_DEPLOYMENT_FIXTURE=changed; build_environment_key)
+node_environment=$(export NODE_OPTIONS=--max-old-space-size=2048; build_environment_key)
+[[ $public_environment != "$environment" && $node_environment != "$environment" ]]
 calculate_keys "$environment"
 application=$source_key dependencies=$dependency_key cache=$cache_key
 printf 'changed docs\n' >> "$FIXTURE/source/README.md"

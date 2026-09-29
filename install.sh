@@ -31,7 +31,13 @@ build_environment_key() {
   # Only the digest is persisted; environment values (including secrets) stay private.
   as_app node --input-type=module -e '
     import { createHash } from "node:crypto";
-    const context = new Set(["PWD", "OLDPWD", "SHLVL", "_", "SUDO_COMMAND", "SUDO_USER", "SUDO_UID", "SUDO_GID", "TERM", "COLORTERM"]);
+    const context = new Set([
+      "PWD", "OLDPWD", "SHLVL", "_", "SUDO_COMMAND", "SUDO_USER", "SUDO_UID", "SUDO_GID", "SUDO_PS1",
+      "TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "VTE_VERSION", "LS_COLORS", "LESSOPEN", "LESSCLOSE",
+      "SSH_CLIENT", "SSH_CONNECTION", "SSH_TTY", "SSH_AUTH_SOCK", "SSH_AGENT_PID", "GPG_TTY",
+      "XDG_SESSION_ID", "XDG_SESSION_CLASS", "XDG_SESSION_TYPE", "XDG_SEAT", "XDG_VTNR", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
+      "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "WINDOWID", "WT_SESSION", "WT_PROFILE_ID", "SESSIONNAME", "TMUX", "TMUX_PANE", "STY", "WINDOW"
+    ]);
     const values = Object.entries(process.env).filter(([key]) => !context.has(key)).sort(([a], [b]) => a.localeCompare(b));
     console.log(createHash("sha256").update(JSON.stringify(values)).digest("hex"));'
 }
