@@ -2,7 +2,7 @@ import { seedLedger, readSource } from './seed';
 import { db } from './sqlite';
 export { db } from './sqlite';
 import { seal, unseal } from './vault';
-import { quotes, syncBybit, syncAster, validateAsterWallet } from './exchanges';
+import { quotes, syncBybit, syncAster, syncBinance, validateAsterWallet } from './exchanges';
 import { editValue, type Credentials, type WithdrawalInput, type AsterAccountInput } from './validation';
 import { asterKey, readAsterAccounts, aggregateAster } from './aster-accounts';
 import { embeddedWithdrawals } from './withdrawals';
@@ -45,7 +45,7 @@ async function readLedger(owner:string,includeHistory:boolean):Promise<Ledger>{
   ledger.assets=rows.results.map(r=>JSON.parse(r.data) as Asset).sort((a,b)=>Number(a.id.slice(4))-Number(b.id.slice(4)));
   ledger.fx=Number(settings.results.find(s=>s.key==='fx')?.value??ledger.fx);
   ledger.fxStatus=JSON.parse(settings.results.find(s=>s.key==='fx-status')?.value??'null')??ledger.fxStatus;
-  for(const name of ['bybit','aster'] as const){
+  for(const name of ['bybit','aster','binance'] as const){
     const meta=settings.results.find(s=>s.key===name+'-status');
     ledger.connections[name]={...ledger.connections[name],...(meta?JSON.parse(meta.value):{}),configured:connectionRows.results.some(r=>r.exchange===name)} as Connection;
   }
@@ -79,7 +79,7 @@ export async function editAsset(owner:string,input:{id:string,quantity:number,pr
   try{
     const ledger=await getCurrentLedger(owner), asset=ledger.assets.find(a=>a.id===input.id);
     if(!asset)throw new Error('未找到该资产');
-    if(asset.mode==='bybit'||asset.mode==='aster')throw new Error('交易所资产由只读接口维护');
+    if(asset.mode==='bybit'||asset.mode==='aster'||asset.mode==='binance')throw new Error('交易所资产由只读接口维护');
     const price=asset.mode==='market'?asset.price:input.price;
     const status=asset.mode==='manual'?'手动估值':asset.status;
     const next={...asset,quantity:input.quantity,price,value:editValue(input.quantity,price),status};
@@ -125,24 +125,41 @@ export async function connect(owner:string,input:Credentials){
   if(input.exchange==='aster')return connectAsterAccount(owner,{...input,id:'default',name:'默认账号'},'legacy');
   await lock(owner);
   try{
+    const ledger=await getCurrentLedger(owner);
+    const matches=ledger.assets.filter(a=>a.mode===input.exchange||(input.exchange==='binance'&&a.mode==='manual'&&a.project.trim().toLowerCase()==='binance'));
+    if(matches.length>1)throw new Error('已有多条交易所资产，请先合并重复记录');
+    let asset=matches[0];
+    if(!asset){
+      if(input.exchange!=='binance')throw new Error('未找到交易所资产');
+      const nextId=Math.max(0,...ledger.assets.map(a=>Number(a.id.slice(4))))+1;
+      if(ledger.assets.length>=1000||!Number.isSafeInteger(nextId)||nextId>999999)throw new Error('资产条目已达到上限');
+      asset={id:'row-'+nextId,project:'binance',kind:'资产',quantity:0,price:1,value:0,cell:'E'+nextId,mode:'binance',updatedAt:'',status:''};
+    }
     const encrypted=await seal(input,owner+':'+input.exchange);
     const prices=await quotes();
-    const result=await syncBybit(input,prices);
+    const result=await (input.exchange==='binance'?syncBinance(input,prices):syncBybit(input,prices));
     const now=new Date().toISOString();
-    await db().prepare('INSERT INTO connections(owner,exchange,encrypted,updated_at) VALUES(?,?,?,?) ON CONFLICT(owner,exchange) DO UPDATE SET encrypted=excluded.encrypted,updated_at=excluded.updated_at').bind(owner,input.exchange,encrypted,now).run();
-    const ledger=await getCurrentLedger(owner),asset=ledger.assets.find(a=>a.mode===input.exchange)!;
-    await saveAsset(owner,{...asset,quantity:result.total,price:1,value:result.total,status:'只读同步',updatedAt:now,error:undefined,details:result.details});
-    await setting(owner,'bybit-status',{configured:true,lastSync:now,error:null,scope:'统一账户 + 资金账户',label:input.apiKey.slice(-4)});
+    const next={...asset,mode:input.exchange,quantity:result.total,price:1,value:result.total,status:'只读同步',updatedAt:now,error:undefined,details:result.details};
+    const status={configured:true,lastSync:now,error:null,scope:ledger.connections[input.exchange].scope,label:input.apiKey.slice(-4)};
+    // Persist a verified connection and its balance together; failed verification changes neither.
+    await db().batch([
+      db().prepare('INSERT INTO connections(owner,exchange,encrypted,updated_at) VALUES(?,?,?,?) ON CONFLICT(owner,exchange) DO UPDATE SET encrypted=excluded.encrypted,updated_at=excluded.updated_at').bind(owner,input.exchange,encrypted,now),
+      db().prepare('INSERT INTO assets(owner,id,data) VALUES(?,?,?) ON CONFLICT(owner,id) DO UPDATE SET data=excluded.data').bind(owner,asset.id,JSON.stringify(next)),
+      db().prepare('INSERT INTO settings(owner,key,value) VALUES(?,?,?) ON CONFLICT(owner,key) DO UPDATE SET value=excluded.value').bind(owner,input.exchange+'-status',JSON.stringify(status)),
+    ]);
     await snapshot(owner);return getLedger(owner);
   }finally{await unlock(owner);}
 }
-export async function disconnect(owner:string,exchange:'bybit'|'aster'){
+export async function disconnect(owner:string,exchange:'bybit'|'aster'|'binance'){
   if(exchange==='aster')return deleteAsterAccount(owner,'default','disconnect');
   await lock(owner);try{
-    const ledger=await getCurrentLedger(owner),asset=ledger.assets.find(a=>a.mode===exchange)!;
-    await db().prepare('DELETE FROM connections WHERE owner = ? AND exchange = ?').bind(owner,exchange).run();
-    await setting(owner,exchange+'-status',{configured:false,lastSync:ledger.connections[exchange].lastSync,error:null,scope:ledger.connections[exchange].scope});
-    await saveAsset(owner,{...asset,status:'已断开 · 保留旧值',error:undefined});await snapshot(owner);return getLedger(owner);
+    const ledger=await getCurrentLedger(owner),asset=ledger.assets.find(a=>a.mode===exchange);
+    await db().batch([
+      db().prepare('DELETE FROM connections WHERE owner = ? AND exchange = ?').bind(owner,exchange),
+      db().prepare('INSERT INTO settings(owner,key,value) VALUES(?,?,?) ON CONFLICT(owner,key) DO UPDATE SET value=excluded.value').bind(owner,exchange+'-status',JSON.stringify({configured:false,lastSync:ledger.connections[exchange].lastSync,error:null,scope:ledger.connections[exchange].scope})),
+      ...(asset?[db().prepare('UPDATE assets SET data = ? WHERE owner = ? AND id = ?').bind(JSON.stringify({...asset,status:'已断开 · 保留旧值',error:undefined}),owner,asset.id)]:[]),
+    ]);
+    await snapshot(owner);return getLedger(owner);
   }finally{await unlock(owner);}
 }
 async function saveAsterAccounts(owner:string,accounts:AsterAccount[],asset:Asset,credential?:{key:string;encrypted?:string}){
@@ -212,21 +229,24 @@ export async function refresh(owner:string){
       const virtual=ledger.assets.find(a=>a.mode==='market')!;
       if(prices){await saveAsset(owner,{...virtual,price:prices.VIRTUAL.price,value:(virtual.quantity??0)*prices.VIRTUAL.price,updatedAt:prices.VIRTUAL.at,status:prices.VIRTUAL.source+' · 实时单价',error:undefined});}
       else await saveAsset(owner,{...virtual,status:'行情失败 · 保留旧值',error:marketError});
-      const bybitSync=async()=>Promise.all(stored.results.filter(row=>row.exchange==='bybit').map(async row=>{
-        const asset=ledger.assets.find(a=>a.mode==='bybit')!;
+      const walletSync=async(exchange:'bybit'|'binance')=>{
+        const row=stored.results.find(row=>row.exchange===exchange);
+        if(!row)return;
+        const asset=ledger.assets.find(a=>a.mode===exchange);
         try{
+          if(!asset)throw new Error('未找到交易所资产，请更新连接');
           if(!prices)throw new Error(marketError);
           const c=await unseal(row.encrypted,owner+':'+row.exchange);
-          const result=await syncBybit(c,prices);
+          const result=await (exchange==='binance'?syncBinance(c,prices):syncBybit(c,prices));
           const now=new Date().toISOString();
           await saveAsset(owner,{...asset,quantity:result.total,price:1,value:result.total,details:result.details,updatedAt:now,status:'只读同步',error:undefined});
-          await setting(owner,'bybit-status',{...ledger.connections.bybit,lastSync:now,error:null});
+          await setting(owner,exchange+'-status',{...ledger.connections[exchange],lastSync:now,error:null});
         }catch(e){
           const error=e instanceof Error?e.message:'同步暂时失败';
-          await saveAsset(owner,{...asset,status:'同步失败 · 保留旧值',error});
-          await setting(owner,'bybit-status',{...ledger.connections.bybit,error});
+          if(asset)await saveAsset(owner,{...asset,status:'同步失败 · 保留旧值',error});
+          await setting(owner,exchange+'-status',{...ledger.connections[exchange],error});
         }
-      }));
+      };
       const asterSync=async()=>{if(ledger.asterAccounts.length){
         const accounts=await mapConcurrent(ledger.asterAccounts,3,async account=>{
           const row=stored.results.find(r=>r.exchange===asterKey(account.id));
@@ -240,7 +260,7 @@ export async function refresh(owner:string){
         });
         await saveAsterAccounts(owner,accounts,ledger.assets.find(a=>a.mode==='aster')!);
       }};
-      const completed=await Promise.allSettled([bybitSync(),asterSync()]);
+      const completed=await Promise.allSettled([walletSync('bybit'),walletSync('binance'),asterSync()]);
       for(const result of completed)if(result.status==='rejected')throw result.reason;
     },async()=>{
       const [fxResult]=await Promise.allSettled([yuanQuote()]);

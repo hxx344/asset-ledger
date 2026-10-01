@@ -1,5 +1,6 @@
 // Production smoke only: injected with Node --import; never loaded by the app itself.
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import { verifyTypedData } from 'ethers';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -20,6 +21,23 @@ globalThis.fetch = async (input, init = {}) => {
   if (url.hostname === 'api.coingecko.com') return flag('market-failure') ? Response.json({}) : Response.json(Object.fromEntries(
     ['virtual-protocol', 'tether', 'usd-coin'].map(id => [id, { usd: 1, last_updated_at: Math.floor(Date.now() / 1000) }]),
   ));
+  if (url.hostname === 'api.binance.com') {
+    assert.equal(init.method,'GET');
+    assert.equal(init.redirect,'manual');
+    assert.equal(new Headers(init.headers).get('X-MBX-APIKEY'),'synthetic-binance-key');
+    const signature=url.searchParams.get('signature');
+    url.searchParams.delete('signature');
+    assert.equal(signature,createHmac('sha256','synthetic-binance-secret').update(url.search.slice(1)).digest('hex'));
+    assert.equal(url.href.includes('synthetic-binance-secret'),false);
+    const fixture=flag('binance-fixture.json')?JSON.parse(readFileSync(join(process.env.ASSET_DATA_DIR,'binance-fixture.json'),'utf8')):{};
+    if (url.pathname === '/sapi/v1/account/apiRestrictions') return Response.json({enableReading:true,enableWithdrawals:false,enableInternalTransfer:false,enableMargin:false,enableFutures:false,permitsUniversalTransfer:false,enableVanillaOptions:false,enableSpotAndMarginTrading:false,enableFixApiTrade:false,enablePortfolioMarginTrading:false,...fixture.permissions});
+    if (url.pathname === '/sapi/v1/asset/wallet/balance') {
+      assert.equal(url.searchParams.get('quoteAsset'),'USDT');
+      if(fixture.failure)return new Response('',{status:503});
+      return Response.json(fixture.wallets??[{activate:true,walletName:'Spot',balance:'100'},{activate:true,walletName:'Funding',balance:'25'}]);
+    }
+    throw new Error('Unexpected Binance route in test');
+  }
   if (url.hostname === 'api.bybit.com') {
     if (url.pathname === '/v5/user/query-api') {
       if (flag('fx-ordering')) writeFileSync(join(process.env.ASSET_DATA_DIR, 'account-before-fx'), 'fixture');

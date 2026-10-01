@@ -32,3 +32,11 @@ test('import retains same-date archives and original historical differences, wit
   assert.equal(parsed.periods[0].difference, 3609);
   assert.equal(parsed.periods[0].rows[0].formula, '=DO_NOT_EXECUTE()');
 });
+
+test('Binance is optional in imported workbooks and duplicate Binance rows are rejected', () => {
+  const input=example();
+  input.periods[0].rows.push({id:'row-7',project:'Binance',kind:'资产',quantity:0,price:1,value:0,cell:'E7'});
+  assert.equal(parseSource(input).periods[0].rows.length,6);
+  input.periods[0].rows.push({id:'row-8',project:' binance ',kind:'资产',quantity:0,price:1,value:0,cell:'E8'});
+  assert.throws(()=>parseSource(input),/Binance/);
+});

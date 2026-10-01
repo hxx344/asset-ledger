@@ -20,7 +20,7 @@ function importPlan(source: SourceLedger, current: Ledger, previous: SourceLedge
     const saved = existing[0];
     if (!saved) return asset;
     matched.add(saved.id);
-    if ((asset.mode === 'bybit' || asset.mode === 'aster') && (current.connections[asset.mode].configured || current.connections[asset.mode].lastSync)) {
+    if ((asset.mode === 'bybit' || asset.mode === 'aster' || asset.mode === 'binance') && (current.connections[asset.mode].configured || current.connections[asset.mode].lastSync)) {
       retained.push(asset.project + ' 已同步余额');
       return { ...saved, id: asset.id, cell: asset.cell };
     }
@@ -39,9 +39,10 @@ function importPlan(source: SourceLedger, current: Ledger, previous: SourceLedge
   });
   let nextId = Math.max(...imported.assets.map(a => Number(a.id.slice(4)))) + 1;
   for (const asset of current.assets) {
-    if (!matched.has(asset.id) && edited(asset)) {
+    const syncedBinance = asset.mode === 'binance' && (current.connections.binance.configured || current.connections.binance.lastSync);
+    if (!matched.has(asset.id) && (edited(asset) || syncedBinance)) {
       imported.assets.push({ ...asset, id: 'row-' + nextId++ });
-      retained.push(asset.project + ' 手动修改（额外保留）');
+      retained.push(asset.project + (syncedBinance ? ' 已同步余额（额外保留）' : ' 手动修改（额外保留）'));
     }
   }
   if (current.fx !== old.fx || current.fxStatus.source !== 'saved') { imported.fx = current.fx; imported.fxStatus = current.fxStatus; retained.push('当前汇率'); }
