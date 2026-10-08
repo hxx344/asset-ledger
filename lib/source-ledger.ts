@@ -39,5 +39,6 @@ export function parseSource(input: unknown): SourceLedger {
     if (baseline.rows.filter(r => r.project === name).length !== 1) throw new Error('原表必须各有一条 virtual、bybit 和 aster 资产');
   }
   if (baseline.rows.filter(r => r.project.trim().toLowerCase() === 'binance').length > 1) throw new Error('原表最多包含一条 Binance 资产，避免重复计入');
+  if (baseline.rows.filter(r => r.project.trim().toLowerCase() === 'okx').length > 1) throw new Error('原表最多包含一条 OKX 资产，避免重复计入');
   return source;
 }

@@ -20,6 +20,18 @@ test('Binance balances are known dynamic assets and retain stale/error states', 
   assert.doesNotMatch(failed.health.message,/未识别/);
 });
 
+test('OKX balances are known dynamic assets and retain stale/error states', () => {
+  const read = (row: ReturnType<typeof asset> & {error?: string}) => buildHubSummary({...input(),assets:[row]},now).data;
+  const freshBalance=read(asset('okx',fresh,125));
+  assert.equal(freshBalance.health.state,'online');
+  assert.equal(freshBalance.metrics[0].value,125);
+  assert.equal(freshBalance.freshness,undefined);
+  assert.equal(read(asset('okx','2020-01-01T00:00:00Z')).health.state,'stale');
+  const failed=read({...asset('okx'),error:'同步失败'});
+  assert.equal(failed.health.state,'partial');
+  assert.doesNotMatch(failed.health.message,/未识别/);
+});
+
 test('summary preserves ledger totals, withdrawals, oldest dynamic time and CNY/USD units', () => {
   const result = buildHubSummary({ ...input(), assets: [asset('market', fresh), asset('aster', '2026-09-22T16:58:00Z', 200), { ...asset('manual', '2020-01-01T00:00:00Z', 25), project: ' 出金 ' }] }, now);
   assert.equal(result.schemaVersion, 2);

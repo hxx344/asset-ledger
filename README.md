@@ -1,6 +1,6 @@
 # 资产统计
 
-个人资产面板，支持 Excel 历史导入、Virtual 实时报价、Bybit / Binance / Aster 只读同步和手动估值。使用 Next.js、Node.js 24 和 SQLite，无需 Sites、Cloudflare 或外部数据库账号。公开仓库仅含虚构示例数据，不含真实资产记录和凭据。
+个人资产面板，支持 Excel 历史导入、Virtual 实时报价、Bybit / Binance / OKX / Aster 只读同步和手动估值。使用 Next.js、Node.js 24 和 SQLite，无需 Sites、Cloudflare 或外部数据库账号。公开仓库仅含虚构示例数据，不含真实资产记录和凭据。
 
 ## 一键部署
 
@@ -123,6 +123,18 @@ Bybit / Binance API Secret 和 Aster API 钱包私钥使用 AES-GCM 加密，登
 
 旧版 Aster API Key / Secret 不能转换成 API Pro 私钥。升级后重新填写 API 钱包即可；旧估值、历史和 Bybit 连接会保留，Aster 验证失败不会替换原连接。若 Aster 返回账户未入金限制，请在 Aster 官方页面检查账户状态。
 
+## OKX 账户资产
+
+在“交易所连接”中选择 OKX，填写国际站实盘 API Key、Secret 和创建 API 时设置的 Passphrase。仅开启读取权限，服务会验证权限和资产读取成功后加密保存三项凭据；更新失败保留原连接。首次成功时新增一条 OKX 资产，已有同名手动行会复用，多条同名行需先合并。断开后保留最后估值、源时间和历史记录。
+
+总额直接读取 OKX 账户资产估值接口的 USD 总额，明细展示接口返回的交易、资金、理财等账户折合金额；这些不是实际 USD 币种持仓。不再次累加保证金、浮盈亏或持仓名义金额，不自动遍历子账户，分项与总额可能有舍入差异。资产更新时间采用 OKX 返回的估值时间，缺失、过期或异常数据保留旧值。OKX 已有美元估值，因此其他币价源故障不影响它独立刷新。
+
+连接和同步仍使用现有账本、日快照与 Hub 后台同步流程，无需数据库迁移。与工作台一起升级时执行：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/hxx344/project-aggregation/main/install-all.sh | sudo bash -s -- --only asset,hub
+```
+
 ## 出金调整与资产变化
 
 总览同时展示原口径表内总额、实际持有资产、累计出金及剔除出金影响后的资产：
@@ -139,7 +151,7 @@ Bybit / Binance API Secret 和 Aster API 钱包私钥使用 AES-GCM 加密，登
 
 Hub 使用与账本相同的登录会话读取 `GET /api/hub/summary?schemaVersion=2`。摘要只读取当前公开估值及历史总额字段，返回最多 90 个有效日期；同日优先日快照，排除未来预填与归档，时间按北京时间，曲线保持表内总额口径（包含原表出金行），不是投资收益。当前持有额单独扣除原表出金行，汇率单位为 CNY/USD。动态资产以最早源时间判断 15 分钟过期；只有全部明确标记手动的账本才视为静态，未知来源、示例、缺失估值和汇率异常仍会报告。
 
-Hub 交易模块可一次性导入本账本保存的全球站 Binance、Bybit HMAC 连接，再向交易所重新验证只读权限。`GET /api/hub/trading-connections` 仅返回当前登录所有者的连接可用性、密钥尾号及版本。`POST /api/hub/trading-connections/export` 要求有效会话、同源 JSON 请求、准确连接版本和再次验证 Asset 登录密码；密码尝试每所有者 15 分钟最多 5 次失败，响应禁止缓存。Aster、非全球站或损坏连接不会导出。Hub 后台使用已保存的 Asset 登录密码，通过 HTTPS 或本机回环 HTTP 请求；密钥不会经过 Hub 页面，代理页面也不能访问导出接口。导入后连接独立管理，源连接变更不自动同步到交易模块。两端升级可运行：`curl -fsSL https://raw.githubusercontent.com/hxx344/project-aggregation/main/install-all.sh | sudo bash -s -- --only asset,hub`。
+Hub 交易模块可一次性导入本账本保存的全球站 Binance、Bybit HMAC 连接，再向交易所重新验证只读权限。`GET /api/hub/trading-connections` 仅返回当前登录所有者的连接可用性、密钥尾号及版本。`POST /api/hub/trading-connections/export` 要求有效会话、同源 JSON 请求、准确连接版本和再次验证 Asset 登录密码；密码尝试每所有者 15 分钟最多 5 次失败，响应禁止缓存。OKX、Aster、非全球站或损坏连接不会导出。Hub 后台使用已保存的 Asset 登录密码，通过 HTTPS 或本机回环 HTTP 请求；密钥不会经过 Hub 页面，代理页面也不能访问导出接口。导入后连接独立管理，源连接变更不自动同步到交易模块。两端升级可运行：`curl -fsSL https://raw.githubusercontent.com/hxx344/project-aggregation/main/install-all.sh | sudo bash -s -- --only asset,hub`。
 
 在 Hub 的受信任代理 iframe 中，账本通过 `project-hub` v1 握手；仅接受同协议和端口的 `hub.localhost` 父窗口消息。未激活、隐藏或离线时暂停页面自动同步，恢复时立即刷新；Hub 自己的后台同步不受影响。保存、导入及实际同步更新会通知 Hub 重读摘要，纯读取不广播。Hub 导航只打开账本总览，不将交易钱包地址映射成资产账号。独立打开账本仍按可见页面每 60 秒同步。
 
@@ -183,8 +195,9 @@ Schema 位于 `db/schema.ts`，`npm run db:generate` 生成增量迁移。迁移
 - [Next.js 独立部署](https://nextjs.org/docs/app/guides/self-hosting)、[Node.js SQLite](https://nodejs.org/api/sqlite.html)
 - [Bybit 钱包余额](https://bybit-exchange.github.io/docs/v5/account/wallet-balance)、[只读权限](https://bybit-exchange.github.io/docs/v5/user/apikey-info)、[资金账户](https://bybit-exchange.github.io/docs/v5/asset/balance/all-balance)
 - [Binance API 权限](https://developers.binance.com/en/docs/catalog/core-trading-wallet/api/rest-api/account)、[钱包资产余额](https://developers.binance.com/en/docs/catalog/core-trading-wallet/api/rest-api/asset)
+- [OKX 请求签名与只读权限](https://www.okx.com/docs-v5/en/#overview-rest-authentication)、[账户配置](https://www.okx.com/docs-v5/en/#trading-account-rest-api-get-account-configuration)、[账户资产估值](https://www.okx.com/docs-v5/en/#funding-account-rest-api-get-account-asset-valuation)
 - [Aster API Pro 签名](https://asterdex.github.io/aster-api-website/futures-v3/general-info/)、[合约账户](https://asterdex.github.io/aster-api-website/futures-v3/account%26trades/)、[现货账户](https://asterdex.github.io/aster-api-website/spot-v3/account%26trades/)
 - [CoinGecko](https://docs.coingecko.com/reference/simple-price)、[Coinbase](https://docs.cdp.coinbase.com/coinbase-app/track-apis/exchange-rates)
 - [Frankfurter 汇率与 ECB 来源筛选](https://frankfurter.dev/)
 
-真实 Bybit / Binance / Aster 账户需在页面填写对应凭据后验证，测试使用临时生成的测试钱包和合成账户数据。
+真实 Bybit / Binance / OKX / Aster 账户需在页面填写对应凭据后验证，测试使用临时生成的测试钱包和合成账户数据。

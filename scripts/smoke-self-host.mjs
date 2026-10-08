@@ -55,7 +55,7 @@ try {
   assert.equal((await request('/api/ledger', 'GET', undefined, { 'oai-authenticated-user-id': 'owner', 'oai-authenticated-user-email': 'spoof@example.test' })).status, 401);
   assert.equal((await request('/api/hub/summary?schemaVersion=2')).status, 401);
   assert.equal((await request('/api/import', 'POST', {})).status, 401);
-  for(const method of ['POST','DELETE'])assert.equal((await request('/api/connections',method,{exchange:'binance'})).status,401);
+  for(const exchange of ['binance','okx'])for(const method of ['POST','DELETE'])assert.equal((await request('/api/connections',method,{exchange})).status,401);
   assert.equal((await request('/api/withdrawals', 'POST', {})).status, 401);
   for(const method of ['POST','PATCH','DELETE'])assert.equal((await request('/api/aster-accounts',method,{})).status,401);
   assert.equal((await request('/api/login', 'POST', { password }, { origin: 'https://untrusted.example' })).status, 403);
@@ -134,6 +134,60 @@ try {
   assert.equal(disconnectedBinance.assets.find(a=>a.mode==='binance').updatedAt,reconnectedBinance.assets.find(a=>a.mode==='binance').updatedAt);
   assert.equal((await (await request('/api/connections','DELETE',{exchange:'binance'})).json()).assets.length,6);
 
+  const okxCredentials={exchange:'okx',apiKey:'synthetic-okx-key',apiSecret:'synthetic-okx-secret',passphrase:'synthetic-okx-passphrase'};
+  const replacementOkx={exchange:'okx',apiKey:'synthetic-okx-key-replacement',apiSecret:'synthetic-okx-secret-replacement',passphrase:'synthetic-okx-passphrase-replacement'};
+  const okxFixture=value=>writeFileSync(join(directory,'okx-fixture.json'),JSON.stringify(value));
+  const initialOkxTimestamp=Date.now()-60000;
+  assert.equal(restored.connections.okx.configured,false);
+  assert.equal(restored.assets.some(a=>a.mode==='okx'),false,'Reading an upgraded ledger does not add an OKX placeholder');
+  assert.equal((await request('/api/connections','POST',okxCredentials,{origin:'https://untrusted.example'})).status,403);
+  assert.equal((await request('/api/connections','POST',{...okxCredentials,url:'https://untrusted.example'})).status,400);
+  assert.equal((await request('/api/connections','POST',{...okxCredentials,passphrase:''})).status,400);
+  for(const fixture of [{permissions:'read_only,trade'},{failure:true}]){
+    okxFixture(fixture);
+    assert.equal((await request('/api/connections','POST',okxCredentials)).status,400);
+    const rejectedOkx=await (await request('/api/ledger')).json();
+    assert.equal(rejectedOkx.connections.okx.configured,false);
+    assert.equal(rejectedOkx.assets.length,6,'Failed first OKX connection cannot create a balance row');
+  }
+  okxFixture({total:'0',ts:initialOkxTimestamp,details:{funding:'0',trading:'0',earn:'0'}});
+  const okxResponse=await request('/api/connections','POST',okxCredentials);
+  const okxText=await okxResponse.text();
+  assert.equal(okxResponse.status,200,okxText);
+  for(const secret of [okxCredentials.apiKey,okxCredentials.apiSecret,okxCredentials.passphrase])assert.equal(okxText.includes(secret),false);
+  const firstOkx=JSON.parse(okxText),okxRow=firstOkx.assets.find(a=>a.mode==='okx');
+  assert.equal(okxRow.value,0);
+  assert.equal(okxRow.updatedAt,new Date(initialOkxTimestamp).toISOString(),'OKX uses the source valuation timestamp');
+  assert.equal(firstOkx.assets.length,7);
+  assert.equal(firstOkx.connections.okx.configured,true);
+  assert.equal(firstOkx.connections.okx.label,'-key');
+  assert.equal((await request('/api/ledger','PATCH',{id:okxRow.id,quantity:1000,price:1})).status,400);
+  const reconnectedOkx=await (await request('/api/connections','POST',okxCredentials)).json();
+  assert.equal(reconnectedOkx.assets.length,7);
+  assert.equal(reconnectedOkx.assets.find(a=>a.mode==='okx').id,okxRow.id);
+  const okxDb=new DatabaseSync(join(directory,'ledger.sqlite'));
+  const okxEncrypted=okxDb.prepare("SELECT encrypted FROM connections WHERE owner='owner' AND exchange='okx'").get().encrypted;
+  for(const secret of [okxCredentials.apiKey,okxCredentials.apiSecret,okxCredentials.passphrase])assert.equal(okxEncrypted.includes(secret),false);
+  const okxSealed=JSON.parse(okxEncrypted);
+  const okxPlaintext=await crypto.subtle.decrypt({name:'AES-GCM',iv:new Uint8Array(okxSealed.iv),additionalData:new TextEncoder().encode('owner:okx')},binanceEncryptionKey,new Uint8Array(okxSealed.cipher));
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(okxPlaintext)),okxCredentials);
+  for(const permissions of ['read_only,withdraw','read_only,trade']){
+    okxFixture({permissions});
+    const rejectedOkx=await request('/api/connections','POST',replacementOkx);
+    assert.equal(rejectedOkx.status,400);
+    const rejectedText=await rejectedOkx.text();
+    for(const secret of [replacementOkx.apiKey,replacementOkx.apiSecret,replacementOkx.passphrase])assert.equal(rejectedText.includes(secret),false);
+    assert.equal(okxDb.prepare("SELECT encrypted FROM connections WHERE owner='owner' AND exchange='okx'").get().encrypted,okxEncrypted);
+    assert.deepEqual((await (await request('/api/ledger')).json()).assets.find(a=>a.mode==='okx'),reconnectedOkx.assets.find(a=>a.mode==='okx'));
+  }
+  okxDb.close();
+  assert.equal((await request('/api/connections','DELETE',{exchange:'okx'},{origin:'https://untrusted.example'})).status,403);
+  const disconnectedOkx=await (await request('/api/connections','DELETE',{exchange:'okx'})).json();
+  assert.equal(disconnectedOkx.connections.okx.configured,false);
+  assert.equal(disconnectedOkx.assets.find(a=>a.mode==='okx').value,0);
+  assert.equal(disconnectedOkx.assets.find(a=>a.mode==='okx').updatedAt,okxRow.updatedAt);
+  assert.equal((await (await request('/api/connections','DELETE',{exchange:'okx'})).json()).assets.length,7);
+
   // A migrated example ledger may already have edits, API connections and snapshots.
   // Seed synthetic encrypted bytes directly; importing must never decrypt or replace them.
   const database = new DatabaseSync(join(directory, 'ledger.sqlite'));
@@ -157,17 +211,21 @@ try {
   assert.equal(previewResponse.status, 200);
   const preview = await previewResponse.json();
   assert.equal(preview.summary.rows, 4);
-  assert.equal(preview.summary.resultingRows, 6, 'Keep edited unmatched asset and disconnected zero Binance balance');
+  assert.equal(preview.summary.resultingRows, 7, 'Keep edited unmatched asset and disconnected zero Binance/OKX balances');
   assert.ok(preview.summary.retained.some(value=>value.includes('binance')&&value.includes('已同步余额')));
+  assert.ok(preview.summary.retained.some(value=>/okx/i.test(value)&&value.includes('已同步余额')));
   assert.equal((await (await request('/api/ledger')).json()).dataKind, 'example');
   assert.equal(existsSync(join(directory, 'backups')), false, 'Preview does not back up or mutate');
   const importedResponse = await request('/api/import', 'POST', { source, apply: true });
   assert.equal(importedResponse.status, 200);
   const imported = await importedResponse.json();
   assert.equal(imported.ledger.dataKind, 'personal');
-  assert.equal(imported.ledger.assets.length, 6);
+  assert.equal(imported.ledger.assets.length, 7);
   assert.equal(imported.ledger.assets.find(a=>a.mode==='binance').value,0);
   assert.equal(imported.ledger.connections.binance.lastSync,disconnectedBinance.connections.binance.lastSync);
+  assert.equal(imported.ledger.assets.find(a=>a.mode==='okx').value,0);
+  assert.equal(imported.ledger.assets.find(a=>a.mode==='okx').updatedAt,okxRow.updatedAt);
+  assert.equal(imported.ledger.connections.okx.lastSync,disconnectedOkx.connections.okx.lastSync);
   assert.equal(imported.ledger.assets.find(a => a.mode === 'market').quantity, 10, 'Use original workbook quantity');
   assert.equal(imported.ledger.assets.find(a => a.mode === 'bybit').id, 'row-21', 'Map by project, not example row number');
   assert.equal(imported.ledger.assets.find(a => a.mode === 'bybit').value, 4321);
@@ -184,7 +242,7 @@ try {
   assert.equal(saved.prepare("SELECT encrypted FROM connections WHERE owner = ? AND exchange = 'bybit'").get('owner').encrypted, 'synthetic-encrypted-fixture');
   saved.close();
   const backup = new DatabaseSync(join(directory, 'backups', imported.backupName));
-  assert.equal(backup.prepare('SELECT COUNT(*) AS count FROM assets').get().count, 6);
+  assert.equal(backup.prepare('SELECT COUNT(*) AS count FROM assets').get().count, 7);
   assert.equal(JSON.parse(backup.prepare("SELECT value FROM settings WHERE key = 'source-ledger'").get().value).source, '示例数据（非真实资产）');
   backup.close();
   assert.equal((await request('/api/ledger', 'PATCH', { id: 'row-23', quantity: 123, price: 2 })).status, 200);
@@ -199,6 +257,24 @@ try {
   assert.equal(afterImportRestart.dataKind, 'personal');
   assert.equal(afterImportRestart.assets.find(a => a.id === 'row-23').value, 246);
   assert.equal(afterImportRestart.assets.find(a=>a.mode==='binance').value,0);
+  assert.equal(afterImportRestart.assets.find(a=>a.mode==='okx').value,0);
+  assert.equal(afterImportRestart.assets.find(a=>a.mode==='okx').updatedAt,okxRow.updatedAt);
+  assert.equal(afterImportRestart.connections.okx.configured,false);
+  // Existing workbooks can contain an OKX manual balance; connecting must reuse it.
+  const manualOkxDb=new DatabaseSync(join(directory,'ledger.sqlite'));
+  const manualOkx={...afterImportRestart.assets.find(a=>a.mode==='okx'),mode:'manual',project:' OKX '};
+  manualOkxDb.prepare('UPDATE assets SET data=? WHERE owner=? AND id=?').run(JSON.stringify(manualOkx),'owner',manualOkx.id);
+  manualOkxDb.close();
+  const restoredOkxTimestamp=Date.now()-5000;
+  okxFixture({total:'321.5',ts:restoredOkxTimestamp,details:{funding:'20',trading:'100',earn:'200',classic:'1'}});
+  const importedOkxResponse=await request('/api/connections','POST',okxCredentials);
+  const importedOkx=await importedOkxResponse.json();
+  assert.equal(importedOkxResponse.status,200);
+  assert.equal(importedOkx.assets.length,7);
+  assert.equal(importedOkx.assets.filter(a=>a.mode==='okx').length,1);
+  assert.equal(importedOkx.assets.find(a=>a.mode==='okx').id,manualOkx.id,'Reuse the existing manual OKX row');
+  assert.equal(importedOkx.assets.find(a=>a.mode==='okx').value,321.5,'Official total is authoritative instead of summing category estimates');
+  assert.equal(importedOkx.assets.find(a=>a.mode==='okx').updatedAt,new Date(restoredOkxTimestamp).toISOString());
   binanceFixture({});
   const importedBinance=await (await request('/api/connections','POST',binanceCredentials)).json();
   assert.equal(importedBinance.assets.filter(a=>a.mode==='binance').length,1);
@@ -233,6 +309,9 @@ try {
   assert.equal(syncedAfterRestart.connections.aster.error, null);
   assert.equal(syncedAfterRestart.assets.find(a=>a.mode==='binance').value,125);
   assert.equal(syncedAfterRestart.connections.binance.error,null);
+  assert.equal(syncedAfterRestart.assets.find(a=>a.mode==='okx').value,321.5);
+  assert.equal(syncedAfterRestart.assets.find(a=>a.mode==='okx').updatedAt,new Date(restoredOkxTimestamp).toISOString());
+  assert.equal(syncedAfterRestart.connections.okx.error,null);
   assert.equal(syncedAfterRestart.fx, 7.1234);
   assert.equal(syncedAfterRestart.fxStatus.source, 'Coinbase');
   assert.equal(syncedAfterRestart.fxStatus.error, null);
@@ -250,11 +329,28 @@ try {
     return response.json();
   };
   assert.equal((await request('/api/connections', 'POST', { exchange: 'bybit', apiKey: 'synthetic-key', apiSecret: 'synthetic-secret', region: 'global' })).status, 200);
+  okxFixture({failure:true});
+  const failedOkx=await forceSync();
+  assert.equal(failedOkx.assets.find(a=>a.mode==='okx').value,321.5);
+  assert.equal(failedOkx.assets.find(a=>a.mode==='okx').updatedAt,syncedAfterRestart.assets.find(a=>a.mode==='okx').updatedAt);
+  assert.equal(failedOkx.connections.okx.lastSync,syncedAfterRestart.connections.okx.lastSync);
+  assert.ok(failedOkx.connections.okx.error);
+  assert.equal(failedOkx.connections.bybit.error,null);
+  assert.equal(failedOkx.connections.aster.error,null);
+  assert.equal(failedOkx.connections.binance.error,null);
+  const failedOkxSummary=await (await request('/api/hub/summary?schemaVersion=2')).json();
+  assert.equal(failedOkxSummary.data.health.state,'partial');
+  assert.doesNotMatch(failedOkxSummary.data.health.message,/未识别/);
+  okxFixture({total:'0',ts:Date.now(),details:{funding:'0',trading:'0',earn:'0'}});
+  const zeroOkx=await forceSync();
+  assert.equal(zeroOkx.assets.find(a=>a.mode==='okx').value,0);
+  assert.equal(zeroOkx.connections.okx.error,null);
+  okxFixture({});
   binanceFixture({failure:true});
   const failedBinance=await forceSync();
   assert.equal(failedBinance.assets.find(a=>a.mode==='binance').value,125);
-  assert.equal(failedBinance.assets.find(a=>a.mode==='binance').updatedAt,syncedAfterRestart.assets.find(a=>a.mode==='binance').updatedAt);
-  assert.equal(failedBinance.connections.binance.lastSync,syncedAfterRestart.connections.binance.lastSync);
+  assert.equal(failedBinance.assets.find(a=>a.mode==='binance').updatedAt,zeroOkx.assets.find(a=>a.mode==='binance').updatedAt);
+  assert.equal(failedBinance.connections.binance.lastSync,zeroOkx.connections.binance.lastSync);
   assert.ok(failedBinance.connections.binance.error);
   assert.equal(failedBinance.connections.bybit.error,null);
   assert.equal(failedBinance.connections.aster.error,null);
@@ -290,9 +386,14 @@ try {
   assert.equal((await (await request('/api/ledger')).json()).fx, 7.1234, 'Auto rate persists across restart');
   rmSync(join(directory, 'fx-failure'));
   writeFileSync(join(directory, 'market-failure'), 'fixture');
+  const independentOkxTimestamp=Date.now()-1000;
+  okxFixture({total:'444.25',ts:independentOkxTimestamp});
   const independentFx = await forceSync();
   assert.equal(independentFx.fxStatus.error, null, 'FX refresh remains independent of crypto quote failures');
   assert.ok(independentFx.assets.find(a => a.mode === 'market').error);
+  assert.equal(independentFx.assets.find(a=>a.mode==='okx').value,444.25,'OKX official valuation stays independent of crypto quote failures');
+  assert.equal(independentFx.assets.find(a=>a.mode==='okx').updatedAt,new Date(independentOkxTimestamp).toISOString());
+  assert.equal(independentFx.connections.okx.error,null);
   rmSync(join(directory, 'market-failure'));
   await forceSync();
   // Exercise upgrading a pre-multi-account database while retaining the original AAD.
@@ -401,5 +502,6 @@ try {
   for (let attempt = 0; attempt < 10; attempt++) assert.equal((await request('/api/login', 'POST', { password: 'incorrect-test-password' })).status, 401);
   assert.equal((await request('/api/login', 'POST', { password })).status, 429);
   assert.equal(output.includes(binanceCredentials.apiSecret),false);
-  console.log('Production smoke passed: authentication, import and backup, edits/history, Binance connection/encryption/zero balance/import/failure/disconnect/restart, Aster multi-account upgrade/CRUD/encryption/isolation/partial failures, automatic FX/failure preservation, restart synchronization, withdrawal CRUD/persistence and login throttling.');
+  for(const credentials of [okxCredentials,replacementOkx])for(const secret of [credentials.apiKey,credentials.apiSecret,credentials.passphrase])assert.equal(output.includes(secret),false);
+  console.log('Production smoke passed: authentication, import and backup, edits/history, Binance connection/encryption/zero balance/import/failure/disconnect/restart, OKX signing/permissions/encryption/official valuation/import/manual-row reuse/failure isolation/disconnect/restart, Aster multi-account upgrade/CRUD/encryption/isolation/partial failures, automatic FX/failure preservation, restart synchronization, withdrawal CRUD/persistence and login throttling.');
 } finally { await stop(); rmSync(directory, { recursive: true }); }
