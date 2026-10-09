@@ -151,7 +151,7 @@ curl -fsSL https://raw.githubusercontent.com/hxx344/project-aggregation/main/ins
 
 Hub 使用与账本相同的登录会话读取 `GET /api/hub/summary?schemaVersion=2`。摘要只读取当前公开估值及历史总额字段，返回最多 90 个有效日期；同日优先日快照，排除未来预填与归档，时间按北京时间，曲线保持表内总额口径（包含原表出金行），不是投资收益。当前持有额单独扣除原表出金行，汇率单位为 CNY/USD。动态资产以最早源时间判断 15 分钟过期；只有全部明确标记手动的账本才视为静态，未知来源、示例、缺失估值和汇率异常仍会报告。
 
-Hub 交易模块可一次性导入本账本保存的全球站 Binance、Bybit HMAC 连接，再向交易所重新验证只读权限。`GET /api/hub/trading-connections` 仅返回当前登录所有者的连接可用性、密钥尾号及版本。`POST /api/hub/trading-connections/export` 要求有效会话、同源 JSON 请求、准确连接版本和再次验证 Asset 登录密码；密码尝试每所有者 15 分钟最多 5 次失败，响应禁止缓存。OKX、Aster、非全球站或损坏连接不会导出。Hub 后台使用已保存的 Asset 登录密码，通过 HTTPS 或本机回环 HTTP 请求；密钥不会经过 Hub 页面，代理页面也不能访问导出接口。导入后连接独立管理，源连接变更不自动同步到交易模块。两端升级可运行：`curl -fsSL https://raw.githubusercontent.com/hxx344/project-aggregation/main/install-all.sh | sudo bash -s -- --only asset,hub`。
+Hub 交易模块可一次性导入本账本保存的全球站 Binance、Bybit HMAC 及 OKX 连接，再向交易所重新验证只读权限。`GET /api/hub/trading-connections` 仅返回当前登录所有者的连接可用性、密钥尾号及版本；默认保留 Binance、Bybit 两条目录供旧版 Hub 使用，新版 Hub 通过 `?include=okx` 获取包含 OKX 的三条目录，两种响应均为 `schemaVersion: 1`，目录不包含密钥、Secret 或 Passphrase。`POST /api/hub/trading-connections/export` 要求有效会话、同源 JSON 请求、准确连接版本和再次验证 Asset 登录密码；密码尝试每所有者 15 分钟最多 5 次失败，响应禁止缓存。OKX 导出凭据包含 API Key、Secret 和 Passphrase；Aster、非全球站或损坏连接不会导出。Hub 后台使用已保存的 Asset 登录密码，通过 HTTPS 或本机回环 HTTP 请求；密钥不会经过 Hub 页面，代理页面也不能访问导出接口。导入后连接独立管理，源连接变更不自动同步到交易模块。两端升级可运行：`curl -fsSL https://raw.githubusercontent.com/hxx344/project-aggregation/main/install-all.sh | sudo bash -s -- --only asset,hub`。
 
 在 Hub 的受信任代理 iframe 中，账本通过 `project-hub` v1 握手；仅接受同协议和端口的 `hub.localhost` 父窗口消息。未激活、隐藏或离线时暂停页面自动同步，恢复时立即刷新；Hub 自己的后台同步不受影响。保存、导入及实际同步更新会通知 Hub 重读摘要，纯读取不广播。Hub 导航只打开账本总览，不将交易钱包地址映射成资产账号。独立打开账本仍按可见页面每 60 秒同步。
 

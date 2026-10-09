@@ -6,7 +6,9 @@ import { readTradingConnections, tradingExportFailure } from '@/lib/trading-expo
 export async function GET(request: Request) {
   try {
     const owner = await apiOwner(request);
-    return json(await readTradingConnections(db(), owner, unseal));
+    // Legacy Hub clients require exactly two rows; new clients explicitly opt in.
+    const includeOkx = new URL(request.url).searchParams.get('include') === 'okx';
+    return json(await readTradingConnections(db(), owner, unseal, { includeOkx }));
   } catch (error) {
     if (error instanceof Error && error.message === 'AUTH_REQUIRED') return json({ error: '请先登录' }, 401);
     const safe = tradingExportFailure(error);

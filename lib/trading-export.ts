@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto';
 import type { openDatabase } from './sqlite.ts';
 
-export type TradingExchange = 'binance' | 'bybit';
+export type TradingExchange = 'binance' | 'bybit' | 'okx';
 type Database = Pick<ReturnType<typeof openDatabase>, 'prepare'>;
 type ConnectionRow = { exchange: string; encrypted: string; updated_at: string };
 type Unseal = (encrypted: string, context: string) => Promise<unknown>;
-type Credentials = { apiKey: string; apiSecret: string };
+type Credentials = { apiKey: string; apiSecret: string; passphrase?: string };
 type ExportInput = { exchange: TradingExchange; revision: string; password: string };
 export type TradingConnectionMetadata = {
   exchange: TradingExchange;
@@ -17,7 +17,7 @@ export type TradingConnectionMetadata = {
   reason: string | null;
 };
 
-const EXCHANGES = ['binance', 'bybit'] as const;
+const EXCHANGES = ['binance', 'bybit', 'okx'] as const;
 const PASSWORD_WINDOW_MS = 15 * 60_000;
 const PASSWORD_ATTEMPTS = 5;
 const INVALID_CONNECTION = 'Asset 连接无法用于导入，请在 Asset 重新保存连接';
@@ -61,8 +61,9 @@ export function tradingConnectionRevision(encrypted: string) {
 }
 
 function validateCredentials(value: unknown, exchange: TradingExchange): Credentials {
+  const fields = exchange === 'okx' ? ['exchange', 'apiKey', 'apiSecret', 'passphrase'] : ['exchange', 'apiKey', 'apiSecret', 'region'];
   if (!record(value) || value.exchange !== exchange
-    || !Object.keys(value).every(key => ['exchange', 'apiKey', 'apiSecret', 'region'].includes(key))) {
+    || !Object.keys(value).every(key => fields.includes(key))) {
     throw new TradingExportError(INVALID_CONNECTION, 409);
   }
   if ((exchange === 'bybit' && value.region !== 'global')
@@ -72,6 +73,13 @@ function validateCredentials(value: unknown, exchange: TradingExchange): Credent
   if (typeof value.apiKey !== 'string' || !/^[A-Za-z0-9_-]{8,512}$/.test(value.apiKey)
     || typeof value.apiSecret !== 'string' || !/^[A-Za-z0-9_-]{8,512}$/.test(value.apiSecret)) {
     throw new TradingExportError(INVALID_CONNECTION, 409);
+  }
+  if (exchange === 'okx') {
+    if (typeof value.passphrase !== 'string' || value.passphrase.length < 8 || value.passphrase.length > 128
+      || /[\u0000-\u001f\u007f-\u009f]/.test(value.passphrase)) {
+      throw new TradingExportError(INVALID_CONNECTION, 409);
+    }
+    return { apiKey: value.apiKey, apiSecret: value.apiSecret, passphrase: value.passphrase };
   }
   return { apiKey: value.apiKey, apiSecret: value.apiSecret };
 }
@@ -87,8 +95,9 @@ function validRow(row: ConnectionRow, exchange: TradingExchange) {
     && row.encrypted.length > 0 && row.encrypted.length <= 32_768;
 }
 
-export async function readTradingConnections(database: Database, owner: string, unseal: Unseal) {
-  const connections = await Promise.all(EXCHANGES.map(async exchange => {
+export async function readTradingConnections(database: Database, owner: string, unseal: Unseal, options: { includeOkx?: boolean } = {}) {
+  const exchanges = options.includeOkx === false ? EXCHANGES.filter(exchange => exchange !== 'okx') : EXCHANGES;
+  const connections = await Promise.all(exchanges.map(async exchange => {
     const metadata: TradingConnectionMetadata = {
       exchange, configured: false, revision: null, label: null, updatedAt: null, supported: true, reason: null,
     };

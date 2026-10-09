@@ -10,6 +10,7 @@ import {
 const key = randomBytes(32);
 const password = 'synthetic-owner-password';
 const credential = { exchange: 'binance', apiKey: 'synthetic-api-key-AB12', apiSecret: 'synthetic-api-secret-CD34' };
+const okxCredential = { exchange: 'okx', apiKey: 'synthetic-okx-key-XY12', apiSecret: 'synthetic-okx-secret-ZW34', passphrase: 'synthetic-okx-passphrase' };
 const updatedAt = '2026-10-07T04:00:00.000Z';
 const now = Date.parse(updatedAt);
 function seal(value: unknown, context: string) {
@@ -41,26 +42,51 @@ function status(expected: number) {
   return (error: unknown) => error instanceof TradingExportError && error.status === expected;
 }
 
-test('catalog has exactly two owner-scoped rows and exposes only key suffix and encrypted revision', async () => {
+test('legacy catalog has exactly two owner-scoped rows and never unseals an OKX or Aster connection', async () => {
   const { database, save } = fixture();
   try {
     const input = await save();
     await save('other', 'bybit', { ...credential, exchange: 'bybit', region: 'global' });
+    await save('owner', 'okx', okxCredential);
     await save('owner', 'aster', { exchange: 'aster', privateKey: 'must-never-be-read' });
     await database.prepare('INSERT INTO settings(owner,key,value) VALUES(?,?,?)').bind('owner', 'binance-status', '{"label":"untrusted-full-key"}').run();
     const calls: string[] = [];
     const catalog = await readTradingConnections(database, 'owner', async (encrypted, context) => {
       calls.push(context); return unseal(encrypted, context);
-    });
+    }, { includeOkx: false });
     assert.deepEqual(calls, ['owner:binance']);
     assert.deepEqual(catalog, { schemaVersion: 1, connections: [
       { exchange: 'binance', configured: true, revision: input.revision, label: 'AB12', updatedAt, supported: true, reason: null },
       { exchange: 'bybit', configured: false, revision: null, label: null, updatedAt: null, supported: true, reason: null },
     ] });
     const text = JSON.stringify(catalog);
-    for (const secret of [credential.apiKey, credential.apiSecret, 'must-never-be-read', 'untrusted-full-key']) assert.equal(text.includes(secret), false);
+    for (const secret of [credential.apiKey, credential.apiSecret, okxCredential.apiKey, okxCredential.apiSecret, okxCredential.passphrase, 'must-never-be-read', 'untrusted-full-key']) assert.equal(text.includes(secret), false);
     assert.equal((await database.prepare('SELECT COUNT(*) AS count FROM assets').first<{ count: number }>())?.count, 0);
     assert.equal((await database.prepare('SELECT COUNT(*) AS count FROM snapshots').first<{ count: number }>())?.count, 0);
+  } finally { database.close(); }
+});
+
+test('extended catalog includes OKX owner metadata without key, secret or passphrase fields', async () => {
+  const { database, save } = fixture();
+  try {
+    const input = await save('owner', 'okx', okxCredential);
+    await save('other', 'binance');
+    await save('other', 'okx', { ...okxCredential, passphrase: 'other-owner-passphrase' });
+    const calls: string[] = [];
+    const catalog = await readTradingConnections(database, 'owner', async (encrypted, context) => {
+      calls.push(context); return unseal(encrypted, context);
+    });
+    assert.equal(catalog.schemaVersion, 1);
+    assert.deepEqual(catalog.connections.map(row => row.exchange), ['binance', 'bybit', 'okx']);
+    assert.deepEqual(calls, ['owner:okx']);
+    assert.equal(catalog.connections[0].configured, false);
+    assert.deepEqual(catalog.connections[2], {
+      exchange: 'okx', configured: true, revision: input.revision, label: 'XY12', updatedAt, supported: true, reason: null,
+    });
+    assert.deepEqual(await readTradingConnections(database, 'owner', unseal, { includeOkx: true }), catalog);
+    for (const secret of [...Object.values(okxCredential).filter(value => value !== 'okx'), 'other-owner-passphrase', 'apiKey', 'apiSecret', 'passphrase']) {
+      assert.equal(JSON.stringify(catalog).includes(secret), false);
+    }
   } finally { database.close(); }
 });
 
@@ -78,6 +104,11 @@ test('export requires password and matching owner, and returns only the exact gl
     const bybit = { ...credential, exchange: 'bybit', region: 'global' };
     const bybitInput = await save('owner', 'bybit', bybit);
     assert.equal((await exportTradingConnection(database, 'owner', bybitInput, dependencies)).region, 'global');
+    const okxInput = await save('owner', 'okx', okxCredential);
+    assert.deepEqual(await exportTradingConnection(database, 'owner', okxInput, dependencies), {
+      schemaVersion: 1, exchange: 'okx', revision: okxInput.revision, region: 'global',
+      credentials: { apiKey: okxCredential.apiKey, apiSecret: okxCredential.apiSecret, passphrase: okxCredential.passphrase },
+    });
   } finally { database.close(); }
 });
 
@@ -89,6 +120,46 @@ test('strict export input rejects Aster, extra fields, malformed revisions, and 
     assert.throws(() => parseTradingExportInput(invalid), status(400));
   }
   assert.equal(parseTradingExportInput({ ...input, revision: 'A'.repeat(64) }).revision, 'a'.repeat(64));
+  assert.equal(parseTradingExportInput({ ...input, exchange: 'okx' }).exchange, 'okx');
+});
+
+test('OKX passphrase validation rejects malformed vaults without secret echoes or metadata leakage', async () => {
+  const { database, save, dependencies } = fixture();
+  try {
+    const values = [
+      { ...okxCredential, passphrase: undefined }, { ...okxCredential, passphrase: '' },
+      { ...okxCredential, passphrase: 'short' }, { ...okxCredential, passphrase: 'x'.repeat(129) },
+      { ...okxCredential, passphrase: 'synthetic\npassphrase' }, { ...okxCredential, passphrase: 'synthetic\u007fpassphrase' },
+      { ...okxCredential, passphrase: 'synthetic\u0080passphrase' }, { ...okxCredential, passphrase: 12345678 },
+      { ...okxCredential, region: 'us' }, { ...okxCredential, exchange: 'bybit' },
+      { ...okxCredential, privateKey: 'must-not-be-accepted' }, { ...okxCredential, apiSecret: 'malformed secret' },
+    ];
+    for (const value of values) {
+      const input = await save('owner', 'okx', value);
+      const metadata = (await readTradingConnections(database, 'owner', unseal)).connections[2];
+      assert.deepEqual(metadata, { exchange: 'okx', configured: false, revision: null, label: null, updatedAt: null, supported: false, reason: 'Asset 连接无法用于导入，请在 Asset 重新保存连接' });
+      await assert.rejects(exportTradingConnection(database, 'owner', input, dependencies), error => status(409)(error) && !String(error).includes(okxCredential.apiSecret));
+    }
+  } finally { database.close(); }
+});
+
+test('OKX export rechecks password, owner and revision before returning any passphrase', async () => {
+  const { database, save, dependencies } = fixture();
+  try {
+    const input = await save('owner', 'okx', okxCredential);
+    const noUnseal = { ...dependencies, unseal: async () => { assert.fail('Rejected export must not unseal the OKX passphrase'); } };
+    await assert.rejects(exportTradingConnection(database, 'other', input, noUnseal), status(409));
+    await assert.rejects(exportTradingConnection(database, 'owner', { ...input, password: 'wrong-password' }, noUnseal), status(401));
+    await assert.rejects(exportTradingConnection(database, 'owner', input, {
+      ...dependencies,
+      unseal: async (encrypted, context) => {
+        const result = await unseal(encrypted, context);
+        await save('owner', 'okx', { ...okxCredential, passphrase: 'replacement-passphrase' });
+        return result;
+      },
+    }), status(409));
+    await assert.rejects(exportTradingConnection(database, 'owner', input, noUnseal), status(409));
+  } finally { database.close(); }
 });
 
 test('unsupported regions, stored exchange mismatch and malformed credentials cannot be selected or exported', async () => {
@@ -185,11 +256,15 @@ test('password limit is persisted, owner-scoped, shared across exchanges, and ex
   try {
     const input = await save();
     const bybitInput = await save('owner', 'bybit', { ...credential, exchange: 'bybit', region: 'global' });
+    const okxInput = await save('owner', 'okx', okxCredential);
     for (let attempt = 0; attempt < 5; attempt++) {
       await assert.rejects(exportTradingConnection(database, 'owner', { ...input, password: 'wrong-password' }, dependencies), status(401));
     }
     await assert.rejects(exportTradingConnection(database, 'owner', bybitInput, {
       ...dependencies, verifyPassword: async () => { assert.fail('Limit checked before expensive verification'); },
+    }), status(429));
+    await assert.rejects(exportTradingConnection(database, 'owner', okxInput, {
+      ...dependencies, verifyPassword: async () => { assert.fail('OKX shares the same owner password limit'); },
     }), status(429));
     assert.deepEqual({ ...await database.prepare('SELECT id,attempts FROM auth_attempts').first() }, { id: 'hub-trading-export:owner', attempts: 5 });
     const otherInput = await save('other');
