@@ -16,9 +16,15 @@ globalThis.fetch = async (input, init = {}) => {
     assert.equal(init.redirect, 'manual');
     assert.equal(init.body, undefined);
     const headers = new Headers(init.headers);
-    assert.equal(headers.get('content-type'), 'application/json');
     const cookie = headers.get('cookie');
     assert.ok(['vr-token=synthetic-var-token', 'vr-token=synthetic-var-token-replacement'].includes(cookie));
+    assert.deepEqual(Object.fromEntries(headers), {
+      accept: 'application/json',
+      'cache-control': 'no-cache',
+      cookie,
+      referer: 'https://omni.variational.io/',
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36',
+    });
     const fixture = variationalFixture();
     const status = fixture.status ?? (fixture.failure === true ? 503 : fixture.failure || 200);
     if (fixture.challenge || fixture.html) {
