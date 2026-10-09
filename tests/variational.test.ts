@@ -12,6 +12,7 @@ function fixture(portfolio: unknown = { balance: '125' }, options: { price?: num
     if (url.hostname === 'omni.variational.io') {
       assert.equal(url.href, 'https://omni.variational.io/api/portfolio?compute_margin=true');
       assert.equal(new Headers(init.headers).get('cookie'), 'vr-token=' + credential.vrToken);
+      assert.equal(new Headers(init.headers).get('content-type'), 'application/json');
       return Response.json(portfolio);
     }
     assert.equal(new Headers(init.headers).has('cookie'), false);
@@ -79,4 +80,59 @@ test('Var HTTP, redirect, transport and JSON failures never expose upstream text
     async () => new Response('{}', { headers: { 'content-length': String(2 * 1024 * 1024 + 1) } }),
     async () => new Response('x'.repeat(2 * 1024 * 1024 + 1)),
   ]) await assert.rejects(syncVariational(credential, fetcher as typeof fetch), safe);
+});
+
+test('Var identifies an explicit browser challenge before HTTP authentication status and never reads its body', async () => {
+  for (const status of [200, 401, 403, 429, 503]) {
+    let calls = 0, cancelled = false;
+    const body = new ReadableStream({ cancel() { cancelled = true; } });
+    await assert.rejects(syncVariational(credential, (async () => {
+      calls++;
+      return new Response(body, { status, headers: { 'cf-mitigated': 'challenge', 'content-type': 'text/html', 'x-omni-auth': 'r' } });
+    }) as typeof fetch), error => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Cloudflare 浏览器验证/);
+      assert.doesNotMatch(error.message, /更新 vr-token|会话已失效/);
+      return true;
+    });
+    assert.equal(calls, 1, 'No pricing request or retry after a portfolio challenge');
+    assert.equal(cancelled, true, 'Discard an unread challenge body');
+  }
+});
+
+test('Var distinguishes a rejected login, generic forbidden access and an unclassified HTML response', async () => {
+  const cases = [
+    { status: 401, contentType: 'application/json', expected: /HTTP 401/, refresh: true },
+    { status: 403, contentType: 'application/json', expected: /HTTP 403/, refresh: false },
+    { status: 403, contentType: 'text/html', expected: /HTTP 403/, refresh: false },
+    { status: 200, contentType: 'text/html; charset=UTF-8', expected: /网页而非账户数据/, refresh: false },
+    { status: 200, contentType: 'application/xhtml+xml', expected: /网页而非账户数据/, refresh: false },
+    { status: 200, contentType: 'text/plain', expected: /账户数据不完整/, refresh: false },
+  ];
+  for (const { status, contentType, expected, refresh } of cases) {
+    let calls = 0;
+    await assert.rejects(syncVariational(credential, (async () => {
+      calls++;
+      return new Response('PRIVATE_RESPONSE ' + credential.vrToken, { status, headers: { 'content-type': contentType, 'server': 'cloudflare' } });
+    }) as typeof fetch), error => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, expected);
+      assert.equal(error.message.includes('更新 vr-token'), refresh);
+      assert.doesNotMatch(error.message, /Cloudflare|PRIVATE_RESPONSE/);
+      assert.equal(error.message.includes(credential.vrToken), false);
+      return true;
+    });
+    assert.equal(calls, 1);
+  }
+});
+
+test('Var exposes a safe timeout diagnosis without leaking network exceptions', async () => {
+  for (const name of ['TimeoutError', 'AbortError']) {
+    await assert.rejects(syncVariational(credential, (async () => { throw new DOMException(credential.vrToken, name); }) as typeof fetch), error => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /读取超时/);
+      assert.equal(error.message.includes(credential.vrToken), false);
+      return true;
+    });
+  }
 });

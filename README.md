@@ -10,6 +10,15 @@
 
 该接口是官方网页内部接口，当前[公开 API 文档](https://docs.variational.io/technical-documentation/api)仅列市场统计。账户字段依据 [Omni 客户端](https://omni.variational.io/_app/immutable/chunks/_rMjg3I8.js)和[资产页面](https://omni.variational.io/_app/immutable/nodes/12.DLyg7qxW.js)的读取方式核实（2026-10-10）；[官方账户说明](https://help.variational.io/en/articles/14765726-making-a-trade-on-omni)定义 Portfolio Value 为账户总价值。接口变化、数据缺失或会话拒绝访问都会报错保留旧值，不填零。接口没有已确认的资产源时间，页面估值时间取账户获取时间与汇率时间的较早者；汇率单独读取 USDC/USD，不依赖 VIRTUAL 行情成功。
 
+连接和后台刷新会区分以下失败原因，页面只显示固定诊断，不显示响应正文或凭据：
+
+- **Cloudflare 浏览器验证**：官方响应带有 `cf-mitigated: challenge`，优先于 HTTP 状态判断；这不能证明令牌失效。当前服务器客户端无法完成该验证，更换令牌不保证恢复后台读取。
+- **HTTP 401**：官网未接受当前会话，请确认 Omni 已登录并更新 `vr-token`。
+- **HTTP 403**：官网拒绝服务器访问，尚不能确认是令牌失效；不会仅凭 403 或 Cloudflare 服务标识推断为浏览器验证。
+- **异常网页或超时**：未收到可用账户数据，保留旧估值和原更新时间，后续刷新可重试。
+
+请求格式已按 [Omni 请求封装](https://omni.variational.io/_app/immutable/chunks/B2Dt0Djp.js)补齐 JSON 内容类型；没有添加浏览器依赖，也不声称补齐请求头可以解除 Cloudflare 验证。账户是否能够持续从服务器读取，仍以部署端携带有效会话的实际结果为准。
+
 本次开发验证使用合成账户响应，实际账户需填写会话后在页面验证。
 
 ## 一键部署

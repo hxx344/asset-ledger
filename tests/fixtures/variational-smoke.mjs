@@ -18,6 +18,30 @@ const rowOf = ledger => ledger.assets.find(asset => asset.mode === 'variational'
 const assertNoSecrets = text => {
   for (const value of [credentials.vrToken, replacement.vrToken]) assert.equal(text.includes(value), false, 'Session values cannot appear in responses or logs');
 };
+const diagnosticCases = [
+  { fixture: { failure: 401 }, kind: 'unauthorized' },
+  { fixture: { failure: 403 }, kind: 'forbidden' },
+  ...[403, 401, 200].map(status => ({ fixture: { challenge: true, status }, kind: 'challenge' })),
+  { fixture: { html: true, status: 200 }, kind: 'html' },
+];
+function assertDiagnostic(message, kind) {
+  assert.equal(typeof message, 'string');
+  assertNoSecrets(message);
+  if (kind === 'challenge') {
+    assert.match(message, /Cloudflare/);
+    assert.match(message, /浏览器验证/);
+  } else if (kind === 'unauthorized') {
+    assert.match(message, /HTTP 401/);
+    assert.match(message, /更新 vr-token/);
+  } else if (kind === 'forbidden') {
+    assert.match(message, /HTTP 403/);
+    assert.doesNotMatch(message, /Cloudflare/);
+  } else if (kind === 'html') {
+    assert.match(message, /网页/);
+    assert.doesNotMatch(message, /Cloudflare/);
+  }
+  if (kind !== 'unauthorized') assert.doesNotMatch(message, /更新 vr-token|已失效|已过期/);
+}
 function assertPreserved(actual, before) {
   for (const field of ['id', 'value', 'quantity', 'price', 'updatedAt', 'details']) assert.deepEqual(actual[field], before[field], `Preserve Var ${field}`);
 }
@@ -111,12 +135,16 @@ async function scenario(runtime, sourceAlias, full) {
         { ...credentials, apiKey: 'unused-key', apiSecret: 'unused-secret' },
         { ...credentials, url: 'https://untrusted.example' },
       ]) await connect(invalid, 400);
-      fixture({ failure: 403 });
-      await connect(credentials, 400);
-      const rejected = await ledger();
-      assert.equal(rejected.assets.length, initialCount, 'Failed first verification cannot add a row');
-      assert.equal(rejected.connections.variational.configured, false);
-      assert.equal(encrypted(), undefined, 'Failed first verification cannot save a credential');
+      for (const item of diagnosticCases) {
+        fixture(item.fixture);
+        const error = await connect(credentials, 400);
+        assertDiagnostic(error.error, item.kind);
+        const rejected = await ledger();
+        assert.equal(rejected.assets.length, initialCount, 'Failed first verification cannot add a row');
+        assert.equal(rowOf(rejected), undefined, 'Failed first verification cannot create an asset');
+        assert.deepEqual(rejected.connections.variational, initial.connections.variational);
+        assert.equal(encrypted(), undefined, 'Failed first verification cannot save a credential');
+      }
 
       fixture({ balance: '0', quote: 0.98 });
       const zero = await connect();
@@ -142,21 +170,30 @@ async function scenario(runtime, sourceAlias, full) {
       assert.equal(rowOf(negative).details[0].quantity, -50);
       assert.equal(rowOf(negative).details[0].price, 0.98);
       const savedCipher = encrypted();
-      fixture({ failure: 503 });
-      await connect(replacement, 400);
-      const failedReplacement = await ledger();
-      assert.deepEqual(rowOf(failedReplacement), rowOf(negative));
-      assert.deepEqual(failedReplacement.connections.variational, negative.connections.variational);
-      assert.equal(encrypted(), savedCipher, 'Rejected replacement cannot overwrite the saved session');
+      for (const item of [...diagnosticCases, { fixture: { failure: 503 } }]) {
+        fixture(item.fixture);
+        const error = await connect(replacement, 400);
+        if (item.kind) assertDiagnostic(error.error, item.kind);
+        const failedReplacement = await ledger();
+        assert.deepEqual(rowOf(failedReplacement), rowOf(negative));
+        assert.deepEqual(failedReplacement.connections.variational, negative.connections.variational);
+        assert.equal(encrypted(), savedCipher, 'Rejected replacement cannot overwrite the saved session');
+      }
 
-      for (const value of [{ failure: 401 }, { failure: 503 }, { portfolio: { balance: null } }, { balance: '300', geckoFailure: true, coinbaseFailure: true }]) {
-        fixture(value);
+      for (const item of [...diagnosticCases, ...[
+        { failure: 503 }, { portfolio: { balance: null } }, { balance: '300', geckoFailure: true, coinbaseFailure: true },
+      ].map(value => ({ fixture: value }))]) {
+        fixture(item.fixture);
         const failed = await forceSync();
         assertPreserved(rowOf(failed), rowOf(negative));
         assert.equal(failed.connections.variational.lastSync, negative.connections.variational.lastSync);
         assert.equal(failed.connections.variational.configured, true);
         assert.ok(failed.connections.variational.error);
         assert.ok(rowOf(failed).error);
+        if (item.kind) {
+          assertDiagnostic(failed.connections.variational.error, item.kind);
+          assertDiagnostic(rowOf(failed).error, item.kind);
+        }
         assert.equal(encrypted(), savedCipher);
       }
       fixture({ balance: '200', geckoFailure: true, coinbaseRate: '0.5' });
@@ -264,5 +301,5 @@ async function scenario(runtime, sourceAlias, full) {
 export async function runVariationalSmoke(runtime) {
   await scenario(runtime, 'var', true);
   await scenario(runtime, 'variational', false);
-  console.log('Variational production smoke passed: authentication/origin checks, encrypted session isolation, failed verification, zero/negative equity, valuation and quote fallback, failure preservation, aliases/duplicate rejection, source import retention, trading export exclusion, disconnect and restart recovery.');
+  console.log('Variational production smoke passed: authentication/origin checks, encrypted session isolation, challenge/401/403/HTML diagnostics, failed verification, zero/negative equity, valuation and quote fallback, failure preservation, aliases/duplicate rejection, source import retention, trading export exclusion, disconnect and restart recovery.');
 }

@@ -15,10 +15,19 @@ globalThis.fetch = async (input, init = {}) => {
     assert.equal(init.method, 'GET');
     assert.equal(init.redirect, 'manual');
     assert.equal(init.body, undefined);
-    const cookie = new Headers(init.headers).get('cookie');
+    const headers = new Headers(init.headers);
+    assert.equal(headers.get('content-type'), 'application/json');
+    const cookie = headers.get('cookie');
     assert.ok(['vr-token=synthetic-var-token', 'vr-token=synthetic-var-token-replacement'].includes(cookie));
     const fixture = variationalFixture();
-    if (fixture.failure) return new Response(cookie, { status: fixture.failure === true ? 503 : fixture.failure });
+    const status = fixture.status ?? (fixture.failure === true ? 503 : fixture.failure || 200);
+    if (fixture.challenge || fixture.html) {
+      return new Response(`<!doctype html><title>${fixture.challenge ? 'Just a moment' : 'Upstream page'}</title><p>${cookie}</p>`, {
+        status,
+        headers: { 'Content-Type': 'text/html; charset=utf-8', ...(fixture.challenge ? { 'cf-mitigated': 'challenge', server: 'cloudflare' } : {}) },
+      });
+    }
+    if (fixture.failure || status >= 400) return Response.json({ error: cookie }, { status });
     return Response.json(fixture.portfolio ?? { balance: fixture.balance ?? '125', upnl: '9000', margin: '8000', sub_accounts: [{ balance: '7000' }] });
   }
   if (url.hostname === 'api.coinbase.com') {
