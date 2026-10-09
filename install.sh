@@ -2,6 +2,135 @@
 set -Eeuo pipefail
 umask 027
 
+# BEGIN CI RELEASE HELPERS -- keep embedded copies identical to deploy/release-common.sh
+# Only discovery uses latest; the archive is always fetched from its immutable commit tag.
+ci_release_resolve() {
+  local repository=$1 workspace=$2 manifest values
+  [[ "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 1
+  CI_RELEASE_REPOSITORY=$repository
+  # shellcheck disable=SC2034 # Part of the shared installer interface.
+  CI_RELEASE_WORK=$workspace
+  mkdir -p -- "$workspace" || return 1
+  manifest="$workspace/release-manifest.json"
+  if ! curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+    --retry 3 --connect-timeout 15 --max-time 90 --max-filesize 1048576 \
+    "https://github.com/$repository/releases/latest/download/release-manifest.json" -o "$manifest"; then
+    printf '[CI] %s 暂无可用部署清单或下载失败；现有服务保持原样。\n' "$repository" >&2
+    return 1
+  fi
+  values=$(python3 - "$manifest" "$repository" "$(uname -m)" <<'CI_MANIFEST_PY'
+import json, re, sys
+from pathlib import Path
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+try:
+    data = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+    architecture = {'x86_64': 'linux-x64', 'aarch64': 'linux-arm64', 'arm64': 'linux-arm64'}[sys.argv[3]]
+    require(type(data['schema']) is int and data['schema'] == 1 and data['repository'] == sys.argv[2], 'repository/schema mismatch')
+    commit = data['commit']
+    require(re.fullmatch(r'[a-f0-9]{40}', commit), 'invalid commit')
+    require(data['tag'] == 'deploy-' + commit, 'tag/commit mismatch')
+    item = data['artifacts'][architecture]
+    require(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*\.tar\.gz', item['file']), 'invalid archive name')
+    for key in ('sha256', 'application_key'):
+        require(re.fullmatch(r'[a-f0-9]{64}', item[key]), 'invalid ' + key)
+    node = data.get('node_version', '')
+    require(not node or re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', node), 'invalid Node version')
+    print('\n'.join([commit, data['tag'], item['file'], item['sha256'], item['application_key'], node]))
+except (OSError, ValueError, KeyError, TypeError, AssertionError) as error:
+    print('[CI] Invalid deployment manifest: ' + str(error), file=sys.stderr)
+    sys.exit(1)
+CI_MANIFEST_PY
+  ) || return 1
+  local -a fields
+  mapfile -t fields <<< "$values"
+  CI_RELEASE_COMMIT=${fields[0]}
+  CI_RELEASE_TAG=${fields[1]}
+  CI_RELEASE_FILE=${fields[2]}
+  CI_RELEASE_SHA256=${fields[3]}
+  CI_RELEASE_APPLICATION_KEY=${fields[4]}
+  # shellcheck disable=SC2034 # Python applications do not consume the Node version.
+  CI_RELEASE_NODE_VERSION=${fields[5]:-}
+  printf '[CI] %s 最新可用部署包：%s。\n' "$repository" "${CI_RELEASE_COMMIT:0:12}"
+}
+
+ci_release_extract() {
+  local cache=$1 destination=$2 archive temporary actual
+  [[ ! -L "$cache" && ( ! -e "$cache" || -d "$cache" ) ]] || { printf '[CI] Invalid archive cache.\n' >&2; return 1; }
+  mkdir -p -- "$cache" || return 1
+  [[ $(stat -c %u "$cache") == "$EUID" ]] || { printf '[CI] Archive cache has an unexpected owner.\n' >&2; return 1; }
+  archive="$cache/$CI_RELEASE_SHA256.tar.gz"
+  [[ ! -L "$archive" && ( ! -e "$archive" || -f "$archive" ) ]] || return 1
+  actual=''
+  if [[ -f "$archive" ]]; then actual=$(sha256sum "$archive" | cut -d ' ' -f1) || return 1; fi
+  if [[ "$actual" != "$CI_RELEASE_SHA256" ]]; then
+    temporary=$(mktemp "$cache/.download.XXXXXXXX") || return 1
+    if ! curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+      --retry 3 --connect-timeout 15 --max-time 600 --max-filesize 2147483648 \
+      "https://github.com/$CI_RELEASE_REPOSITORY/releases/download/$CI_RELEASE_TAG/$CI_RELEASE_FILE" -o "$temporary"; then
+      rm -f -- "$temporary"
+      return 1
+    fi
+    actual=$(sha256sum "$temporary" | cut -d ' ' -f1) || { rm -f -- "$temporary"; return 1; }
+    if [[ "$actual" != "$CI_RELEASE_SHA256" ]]; then
+      printf '[CI] 部署包校验失败；现有服务保持原样。\n' >&2
+      rm -f -- "$temporary"
+      return 1
+    fi
+    chmod 0644 "$temporary" || { rm -f -- "$temporary"; return 1; }
+    mv -f -- "$temporary" "$archive" || return 1
+  else
+    printf '[CI] 部署包已缓存且校验通过，跳过下载。\n'
+  fi
+  python3 - "$archive" "$destination" "$CI_RELEASE_COMMIT" "$CI_RELEASE_APPLICATION_KEY" <<'CI_EXTRACT_PY'
+import os, shutil, sys, tarfile
+from pathlib import Path, PurePosixPath
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+try:
+    destination = Path(sys.argv[2])
+    require(not destination.is_symlink(), 'destination cannot be a symlink')
+    destination.mkdir(parents=True, exist_ok=True)
+    require(not any(destination.iterdir()), 'destination must be empty')
+    with tarfile.open(sys.argv[1], 'r:gz') as archive:
+        members = []
+        names, total = set(), 0
+        for member in archive:
+            require(len(members) < 200000, 'too many archive entries')
+            path = PurePosixPath(member.name)
+            require(not path.is_absolute() and '..' not in path.parts and '\\' not in member.name and ':' not in member.name, 'unsafe archive path')
+            require(member.isdir() or member.isfile(), 'archive links and special files are forbidden')
+            name = str(path)
+            require(name not in names, 'duplicate archive entry')
+            names.add(name)
+            total += member.size
+            require(0 <= member.size and total <= 2147483648, 'archive too large')
+            members.append(member)
+        for member in members:
+            path = destination.joinpath(*PurePosixPath(member.name).parts)
+            if member.isdir():
+                path.mkdir(parents=True, exist_ok=True)
+                path.chmod(0o755)
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with archive.extractfile(member) as source, path.open('xb') as target:
+                    shutil.copyfileobj(source, target)
+                path.chmod(0o755 if member.mode & 0o111 else 0o644)
+    destination.chmod(0o755)
+    for directory in destination.rglob('*'):
+        if directory.is_dir():
+            directory.chmod(0o755)
+    require((destination / '.release-commit').read_text().strip() == sys.argv[3], 'archive commit mismatch')
+    require((destination / '.release-application-key').read_text().strip() == sys.argv[4], 'archive application key mismatch')
+except (OSError, ValueError, EOFError, tarfile.TarError, AssertionError) as error:
+    print('[CI] Invalid deployment archive: ' + str(error), file=sys.stderr)
+    sys.exit(1)
+CI_EXTRACT_PY
+}
+# END CI RELEASE HELPERS
+
 APP_ROOT=/opt/asset-ledger
 DATA_DIR=/var/lib/asset-ledger
 APP_USER=asset-ledger
@@ -13,6 +142,8 @@ DATA_FILE=''
 BACKUP_KEEP_ARG=''
 BACKUP_KEEP=7
 CLEANUP_ONLY=0
+DEPLOY_MODE=${PROJECT_DEPLOY_MODE:-source}
+REBUILD=0
 RELEASE='' NEW_RELEASE='' PREVIOUS='' BACKUP='' DOWNLOAD='' SWITCHED=0 WAS_ACTIVE=0
 CURRENT='' RUNNING='' SOURCE_DIR='' KEEP_RELEASE=''
 MOUNT_TARGETS='' BUILD_CACHE='' ARTIFACT_COMMIT=''
@@ -338,10 +469,12 @@ while (($#)); do
     --data-file) (($# >= 2)) || die '--data-file 缺少参数'; DATA_FILE=$2; shift 2 ;;
     --backup-keep) (($# >= 2)) || die '--backup-keep 缺少数量'; BACKUP_KEEP_ARG=$2; shift 2 ;;
     --cleanup) CLEANUP_ONLY=1; shift ;;
+    --rebuild) REBUILD=1; DEPLOY_MODE=source; shift ;;
     --help|-h) usage; exit 0 ;;
     *) die "未知参数：$1" ;;
   esac
 done
+[[ $DEPLOY_MODE == source || $DEPLOY_MODE == ci ]] || die "PROJECT_DEPLOY_MODE must be ci or source"
 [[ $EUID -eq 0 ]] || die '请使用 sudo 或 root 执行。'
 [[ -d /run/systemd/system ]] || die '此脚本需要 systemd。'
 # shellcheck source=/dev/null
@@ -393,11 +526,13 @@ if ((CLEANUP_ONLY)); then
   return
 fi
 export DEBIAN_FRONTEND=noninteractive
-for package in ca-certificates curl git xz-utils; do [[ $(dpkg-query -W -f='${Status}' "$package" 2>/dev/null) == 'install ok installed' ]] || missing=1; done
+local -a packages=(ca-certificates curl tar xz-utils python3)
+[[ $DEPLOY_MODE == ci ]] || packages+=(git)
+for package in "${packages[@]}"; do [[ $(dpkg-query -W -f='${Status}' "$package" 2>/dev/null) == 'install ok installed' ]] || missing=1; done
 if ((missing)); then
   require_space /var 524288 5000
   apt-get update -qq
-  apt-get install -y -qq ca-certificates curl git xz-utils
+  apt-get install -y -qq "${packages[@]}"
 fi
 id "$APP_USER" &>/dev/null || useradd --system --user-group --home-dir "$DATA_DIR" --shell /usr/sbin/nologin "$APP_USER"
 install -d -m 0700 -o "$APP_USER" -g "$APP_USER" "$DATA_DIR"
@@ -419,6 +554,16 @@ if [[ ! -x $NODE_HOME/bin/node ]]; then
 fi
 export PATH="$NODE_HOME/bin:$PATH"
 [[ $(node --version) == "v$NODE_VERSION" ]] || die '专用 Node.js 版本不匹配。'
+as_app() { runuser -u "$APP_USER" -- env PATH="$PATH" HOME="$DATA_DIR" NEXT_TELEMETRY_DISABLED=1 ASSET_DATA_DIR="$DATA_DIR" "$@"; }
+if [[ $DEPLOY_MODE == ci ]]; then
+  DOWNLOAD=$(mktemp -d "$APP_ROOT/runtime/download.XXXXXX")
+  ci_release_resolve hxx344/asset-ledger "$DOWNLOAD" || die 'CI manifest unavailable.'
+  [[ $CI_RELEASE_NODE_VERSION == "$NODE_VERSION" ]] || die 'CI Node.js version mismatch.'
+  COMMIT=$CI_RELEASE_COMMIT
+  dependency_key=$CI_RELEASE_APPLICATION_KEY
+  source_key=$(printf '%s\n' "$dependency_key" "$NODE_DIST" ci-runtime-v1 | sha256sum | cut -d' ' -f1)
+  cache_key=$source_key
+else
 require_space "$APP_ROOT" 65536 1024
 if [[ ! -d $APP_ROOT/source.git ]]; then
   git clone --bare "$REPO_URL" "$APP_ROOT/source.git"
@@ -426,10 +571,10 @@ fi
 [[ $(git --git-dir="$APP_ROOT/source.git" remote get-url origin) == "$REPO_URL" ]] || die '源码仓库地址不匹配。'
 git --git-dir="$APP_ROOT/source.git" fetch --prune origin main
 COMMIT=$(git --git-dir="$APP_ROOT/source.git" rev-parse --verify 'FETCH_HEAD^{commit}')
-as_app() { runuser -u "$APP_USER" -- env PATH="$PATH" HOME="$DATA_DIR" NEXT_TELEMETRY_DISABLED=1 ASSET_DATA_DIR="$DATA_DIR" "$@"; }
 calculate_keys "$(build_environment_key)"
+fi
 ARTIFACT_COMMIT=$COMMIT
-if [[ -n $PREVIOUS && -f $PREVIOUS/.install-build && $(cat "$PREVIOUS/.install-build") == "$source_key" && -f $PREVIOUS/.install-artifact-commit ]] && ready_release "$PREVIOUS"; then
+if (( ! REBUILD )) && [[ -n $PREVIOUS && -f $PREVIOUS/.install-build && $(cat "$PREVIOUS/.install-build") == "$source_key" && -f $PREVIOUS/.install-artifact-commit ]] && ready_release "$PREVIOUS"; then
   RELEASE=$PREVIOUS
   ARTIFACT_COMMIT=$(cat "$RELEASE/.install-artifact-commit")
   [[ $ARTIFACT_COMMIT =~ ^[a-f0-9]{40}$ ]] || die '运行产物版本标记无效。'
@@ -444,13 +589,21 @@ else
 read_mounts
 prune_releases
 prune_backups
-check_build_space
+if [[ $DEPLOY_MODE == ci ]]; then
+  require_space "$APP_ROOT/releases" 1048576 50000
+  ci_release_extract "$APP_ROOT/archive-cache" "$DOWNLOAD/package" || die "CI archive download or extraction failed."
+else check_build_space; fi
 RELEASE=$(mktemp -d "$APP_ROOT/releases/${COMMIT:0:12}.XXXXXX")
 NEW_RELEASE=$RELEASE
 touch "$RELEASE/.install-owned"
+if [[ $DEPLOY_MODE == ci ]]; then
+  cp -a --reflink=auto "$DOWNLOAD/package/." "$RELEASE/"
+  [[ -f $RELEASE/.next/standalone/server.js && -f $RELEASE/.next/BUILD_ID && -f $RELEASE/scripts/configure.mjs && -f $RELEASE/scripts/backup.mjs ]] || die 'Incomplete CI runtime archive.'
+  printf '已校验并解包 CI 运行版本，跳过项目依赖安装和现场构建。\n'
+else
 chown "$APP_USER:$APP_USER" "$RELEASE"
 git --git-dir="$APP_ROOT/source.git" archive "$COMMIT" | as_app tar -x --no-same-owner -C "$RELEASE"
-if [[ -n $PREVIOUS && -f $PREVIOUS/.install-dependencies && $(cat "$PREVIOUS/.install-dependencies") == "$dependency_key" && -f $PREVIOUS/node_modules/.package-lock.json && -x $PREVIOUS/node_modules/.bin/next && ! -L $PREVIOUS/node_modules ]]; then
+if (( ! REBUILD )) && [[ -n $PREVIOUS && -f $PREVIOUS/.install-dependencies && $(cat "$PREVIOUS/.install-dependencies") == "$dependency_key" && -f $PREVIOUS/node_modules/.package-lock.json && -x $PREVIOUS/node_modules/.bin/next && ! -L $PREVIOUS/node_modules ]]; then
   as_app cp -a --no-preserve=ownership --reflink=auto "$PREVIOUS/node_modules" "$RELEASE/node_modules"
   reused=1
   printf '依赖未变，复用独立副本。\n'
@@ -464,6 +617,7 @@ cp -a "$RELEASE/.next/static" "$RUNTIME_APP/.next/static"
 cp -a "$RELEASE/public" "$RUNTIME_APP/public"
 install -d "$RUNTIME_APP/drizzle"
 cp -a "$RELEASE/drizzle/." "$RUNTIME_APP/drizzle/"
+fi
 # The service account can write data, but cannot alter code used by privileged upgrade steps.
 # One traversal; do not follow the shared build-cache or package symlinks.
 find "$RELEASE" -xdev -exec chown -h "root:$APP_USER" {} + ! -type l -exec chmod u=rwX,g=rX,o= {} +
@@ -516,8 +670,10 @@ done
 ((HEALTHY)) || die '新服务未通过健康检查。'
 if ((built)); then
   if ! ((reused)) || ! dependency_sizes "$PREVIOUS" "$dependency_key"; then
-    DEPENDENCY_KB=$(du -sk -- "$RELEASE/node_modules" | awk '{print $1}')
-    DEPENDENCY_INODES=$(du --inodes -s -- "$RELEASE/node_modules" | awk '{print $1}')
+    local dependencies="$RELEASE/node_modules"
+    [[ $DEPLOY_MODE != ci ]] || dependencies="$RELEASE/.next/standalone/node_modules"
+    DEPENDENCY_KB=$(du -sk -- "$dependencies" | awk '{print $1}')
+    DEPENDENCY_INODES=$(du --inodes -s -- "$dependencies" | awk '{print $1}')
   fi
   atomic_stamp "$RELEASE/.install-dependency-sizes" "$dependency_key $DEPENDENCY_KB $DEPENDENCY_INODES"
   atomic_stamp "$RELEASE/.install-build-kb" "$(du -sk --exclude=cache -- "$RELEASE/.next" | awk '{print $1}')"

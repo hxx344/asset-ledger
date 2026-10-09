@@ -11,11 +11,13 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { configure } from './configure.mjs';
 
 const directory = mkdtempSync(join(tmpdir(), 'asset-ledger-smoke-'));
-const runtime = resolve('.next/standalone');
+const runtime = resolve(process.env.ASSET_RELEASE_ROOT ?? '.', '.next/standalone');
 assert.ok(existsSync(join(runtime, 'server.js')), 'Run npm run build first');
+if (!process.env.ASSET_RELEASE_ROOT) {
 cpSync('public', join(runtime, 'public'), { recursive: true });
 cpSync('.next/static', join(runtime, '.next/static'), { recursive: true });
 cpSync('drizzle', join(runtime, 'drizzle'), { recursive: true });
+}
 const password = 'smoke-test-password-12345';
 configure(directory, { password });
 const originalConfig = readFileSync(join(directory, 'config.json'), 'utf8');

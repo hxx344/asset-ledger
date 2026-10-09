@@ -58,3 +58,5 @@ next-env.d.ts
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+
+/release-output/

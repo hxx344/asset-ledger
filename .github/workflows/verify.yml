@@ -6,12 +6,17 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-concurrency:
-  group: verify-${{ github.ref }}
-  cancel-in-progress: true
 jobs:
   application:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            architecture: x64
+          - runner: ubuntu-22.04-arm
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -20,20 +25,85 @@ jobs:
           node-version: 24.15.0
           cache: npm
       - run: npm ci
-      - run: npm test
+      - if: matrix.architecture == 'x64'
+        run: npm test
       - run: npm run build
-      - run: npm run test:smoke
+      - run: node scripts/pack-release.mjs
+      - name: Exercise extracted standalone runtime
+        run: |
+          mkdir "$RUNNER_TEMP/asset-package"
+          tar -xzf release-output/*.tar.gz -C "$RUNNER_TEMP/asset-package"
+          ASSET_RELEASE_ROOT="$RUNNER_TEMP/asset-package" npm run test:smoke
       - run: bash -n install.sh
-      - run: bash tests/install-storage.sh
-      - run: bash tests/install-incremental.sh
+      - if: matrix.architecture == 'x64'
+        run: |
+          bash tests/install-storage.sh
+          bash tests/install-incremental.sh
+          node --test tests/release-inputs.test.mjs
+          python3 deploy/test-release.py -v
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-release-${{ matrix.architecture }}
+          path: release-output/
+          retention-days: 7
   installer:
     if: github.event_name != 'pull_request'
+    needs: application
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: Install, upgrade and recover a failed upgrade
         run: sudo bash tests/install-integration.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.15.0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: asset-release-*
+          path: release-output/
+          merge-multiple: true
+      - run: node scripts/merge-release.mjs
+      - run: sudo --preserve-env=GITHUB_ACTIONS python3 tests/install-release.py asset
       - name: Service logs on failure
         if: failure()
         run: sudo journalctl -u asset-ledger --no-pager -n 100
+  fresh-ci-install:
+    needs: application
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.15.0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: asset-release-*
+          path: release-output/
+          merge-multiple: true
+      - run: node scripts/merge-release.mjs
+      - run: sudo --preserve-env=GITHUB_ACTIONS python3 tests/install-release.py asset
+  publish:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: [application, installer, fresh-ci-install]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: deployment-release-main
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.15.0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: asset-release-*
+          path: release-output/
+          merge-multiple: true
+      - run: node scripts/merge-release.mjs
+      - run: node scripts/publish-release.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
