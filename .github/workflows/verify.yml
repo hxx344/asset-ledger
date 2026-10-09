@@ -41,6 +41,7 @@ jobs:
           bash tests/install-incremental.sh
           node --test tests/release-inputs.test.mjs tests/release-publish.test.mjs
           python3 deploy/test-release.py -v
+          python3 deploy/test-promote.py -v
       - uses: actions/upload-artifact@v4
         with:
           name: asset-release-${{ matrix.architecture }}

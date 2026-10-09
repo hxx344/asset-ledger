@@ -4,13 +4,15 @@
 
 ## 一键部署
 
-支持 Ubuntu 22.04 / 24.04、Debian 12 / 13，amd64 / arm64，需 systemd。默认安装 CI 预先构建的运行包，服务器不执行 npm 安装或 Next 构建；显式源码构建模式仍建议至少 2 核、4 GB 内存和 3 GB 可用磁盘。
+支持 Ubuntu 22.04 / 24.04、Debian 12 / 13，amd64 / arm64，需 systemd。默认安装 CI 预先构建并明确发布的正式运行包，服务器不执行 npm 安装或 Next 构建；显式源码构建模式仍建议至少 2 核、4 GB 内存和 3 GB 可用磁盘。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/hxx344/asset-ledger/main/install.sh | sudo bash
 ```
 
 自动准备 Node.js、下载并校验对应架构的 CI 运行包、生成登录密码、初始化 SQLite 并注册开机自启服务。首次安装仅监听服务器本机 `127.0.0.1:5678`，通过 SSH 隧道访问，使用终端显示的独立登录密码进入账本。服务器只需允许现有 SSH 连接，无需对公网开放 5678；脚本不修改 SSH 服务或防火墙规则。制品发布和源码后备模式见 [CI 运行包部署](docs/ci-release.md)。
+
+`main` CI 全部通过后，只发布 `deploy-<完整提交号>` 候选 Release（`prerelease`），不改变当前正式版。发布者在 GitHub Actions 选择 **[Publish stable release](.github/workflows/promote-release.yml)**，分支选 `main`，在 `commit` 中填写已通过本仓库 CI 的完整 40 位提交 SHA 后运行；核验清单和部署包后，候选才晋级为最新正式版。默认安装及工作台前端更新只使用正式版，未晋级的候选不会自动安装。
 
 已部署的服务切换为 SSH 隧道访问、端口 5678（在服务器执行，保留数据、密码和加密配置）：
 
