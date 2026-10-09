@@ -9,6 +9,7 @@ import { join, resolve } from 'node:path';
 import { createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { configure } from './configure.mjs';
+import { runVariationalSmoke } from '../tests/fixtures/variational-smoke.mjs';
 
 const directory = mkdtempSync(join(tmpdir(), 'asset-ledger-smoke-'));
 const runtime = resolve(process.env.ASSET_RELEASE_ROOT ?? '.', '.next/standalone');
@@ -507,3 +508,5 @@ try {
   for(const credentials of [okxCredentials,replacementOkx])for(const secret of [credentials.apiKey,credentials.apiSecret,credentials.passphrase])assert.equal(output.includes(secret),false);
   console.log('Production smoke passed: authentication, import and backup, edits/history, Binance connection/encryption/zero balance/import/failure/disconnect/restart, OKX signing/permissions/encryption/official valuation/import/manual-row reuse/failure isolation/disconnect/restart, Aster multi-account upgrade/CRUD/encryption/isolation/partial failures, automatic FX/failure preservation, restart synchronization, withdrawal CRUD/persistence and login throttling.');
 } finally { await stop(); rmSync(directory, { recursive: true }); }
+
+await runVariationalSmoke(runtime);

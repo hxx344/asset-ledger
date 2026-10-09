@@ -1,0 +1,268 @@
+// Standalone production integration checks. Every account and credential is synthetic.
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { createServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join, resolve } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { setTimeout as delay } from 'node:timers/promises';
+import { pathToFileURL } from 'node:url';
+import { configure } from '../../scripts/configure.mjs';
+
+const credentials = { exchange: 'variational', vrToken: 'synthetic-var-token' };
+const replacement = { exchange: 'variational', vrToken: 'synthetic-var-token-replacement' };
+const password = 'synthetic-var-password-12345';
+const rowOf = ledger => ledger.assets.find(asset => asset.mode === 'variational');
+const assertNoSecrets = text => {
+  for (const value of [credentials.vrToken, replacement.vrToken]) assert.equal(text.includes(value), false, 'Session values cannot appear in responses or logs');
+};
+function assertPreserved(actual, before) {
+  for (const field of ['id', 'value', 'quantity', 'price', 'updatedAt', 'details']) assert.deepEqual(actual[field], before[field], `Preserve Var ${field}`);
+}
+function sourceFor(alias) {
+  const source = JSON.parse(readFileSync(resolve('lib/example-ledger.json'), 'utf8'));
+  source.source = `synthetic-${alias}-workbook.xlsx`;
+  const period = source.periods[0];
+  period.rows = period.rows.slice(0, 3);
+  period.rows.push({ id: 'row-40', cell: 'E40', project: alias, kind: '资产', quantity: 999, price: 1, value: 999 });
+  period.total = period.rowSum = period.rows.reduce((sum, row) => sum + row.value, 0);
+  period.cny = period.total * period.fx;
+  return source;
+}
+
+async function scenario(runtime, sourceAlias, full) {
+  const temporaryRoot = resolve(tmpdir());
+  const directory = mkdtempSync(join(temporaryRoot, 'asset-var-smoke-'));
+  configure(directory, { password });
+  const configuration = readFileSync(join(directory, 'config.json'), 'utf8');
+  let server, port, cookie = '', output = '';
+  const fixture = value => writeFileSync(join(directory, 'variational-fixture.json'), JSON.stringify(value));
+  const database = action => {
+    const db = new DatabaseSync(join(directory, 'ledger.sqlite'));
+    try { return action(db); } finally { db.close(); }
+  };
+  const encrypted = () => database(db => db.prepare("SELECT encrypted FROM connections WHERE owner='owner' AND exchange='variational'").get()?.encrypted);
+  async function start() {
+    const reservation = createServer();
+    await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
+    port = reservation.address().port;
+    await new Promise(resolve => reservation.close(resolve));
+    server = spawn(process.execPath, ['--import', pathToFileURL(resolve('tests/fixtures/exchange-fetch.mjs')).href, 'server.js'], {
+      cwd: runtime,
+      env: { ...process.env, NODE_ENV: 'production', ASSET_DATA_DIR: directory, ASSET_RELEASE: 'var-smoke', HOSTNAME: '127.0.0.1', PORT: String(port), NEXT_TELEMETRY_DISABLED: '1' },
+      stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    });
+    server.stdout.on('data', data => { output += data; });
+    server.stderr.on('data', data => { output += data; });
+    for (let count = 0; count < 100; count++) {
+      if (server.exitCode !== null) throw new Error('Var smoke server exited: ' + output);
+      try { if ((await fetch(`http://127.0.0.1:${port}/api/health`)).ok) return; } catch {}
+      await delay(200);
+    }
+    throw new Error('Var smoke server did not become healthy: ' + output);
+  }
+  async function stop() {
+    if (server && server.exitCode === null) {
+      const stopped = new Promise(resolve => server.once('exit', resolve));
+      server.kill(); await stopped;
+    }
+  }
+  async function request(path, method = 'GET', body, extra = {}) {
+    const origin = `http://127.0.0.1:${port}`;
+    return fetch(origin + path, {
+      method, redirect: 'manual',
+      headers: { ...(cookie ? { cookie } : {}), ...(method !== 'GET' ? { origin, 'Content-Type': 'application/json' } : {}), ...extra },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  }
+  async function json(path, method = 'GET', body, status = 200, extra = {}) {
+    const response = await request(path, method, body, extra);
+    const text = await response.text();
+    assertNoSecrets(text);
+    assert.equal(response.status, status, `${method} ${path}: ${text}`);
+    return JSON.parse(text);
+  }
+  const ledger = () => json('/api/ledger');
+  const connect = (value = credentials, status = 200) => json('/api/connections', 'POST', value, status);
+  async function forceSync() {
+    database(db => db.prepare("UPDATE settings SET value='0' WHERE owner='owner' AND key='last-attempt'").run());
+    return json('/api/sync', 'POST', {});
+  }
+  async function restart() { await stop(); configure(directory); await start(); }
+
+  try {
+    await start();
+    for (const method of ['POST', 'DELETE']) await json('/api/connections', method, credentials, 401);
+    const login = await request('/api/login', 'POST', { password });
+    assert.equal(login.status, 200);
+    cookie = login.headers.get('set-cookie').split(';')[0];
+    const initial = await ledger();
+    const initialCount = initial.assets.length;
+    assert.equal(initial.connections.variational.configured, false);
+    assert.equal(rowOf(initial), undefined, 'Reading an existing ledger must not add a placeholder');
+    for (const method of ['POST', 'DELETE']) await json('/api/connections', method, credentials, 403, { origin: 'https://untrusted.example' });
+
+    if (full) {
+      for (const invalid of [
+        { ...credentials, vrToken: '' }, { ...credentials, vrToken: 'vr-token=' + credentials.vrToken },
+        { ...credentials, vrToken: credentials.vrToken + '; extra=value' },
+        { ...credentials, apiKey: 'unused-key', apiSecret: 'unused-secret' },
+        { ...credentials, url: 'https://untrusted.example' },
+      ]) await connect(invalid, 400);
+      fixture({ failure: 403 });
+      await connect(credentials, 400);
+      const rejected = await ledger();
+      assert.equal(rejected.assets.length, initialCount, 'Failed first verification cannot add a row');
+      assert.equal(rejected.connections.variational.configured, false);
+      assert.equal(encrypted(), undefined, 'Failed first verification cannot save a credential');
+
+      fixture({ balance: '0', quote: 0.98 });
+      const zero = await connect();
+      assert.equal(zero.assets.length, initialCount + 1);
+      assert.equal(rowOf(zero).value, 0);
+      assert.equal(rowOf(zero).details[0].quantity, 0);
+      assert.equal(zero.connections.variational.configured, true);
+      assert.equal(zero.connections.variational.label, undefined, 'No session suffix may be exposed as a label');
+      await json('/api/ledger', 'PATCH', { id: rowOf(zero).id, quantity: 1000, price: 1 }, 400);
+      const sealed = JSON.parse(encrypted());
+      assertNoSecrets(encrypted());
+      const key = await crypto.subtle.importKey('raw', Buffer.from(JSON.parse(configuration).credentialKey, 'hex'), 'AES-GCM', false, ['decrypt']);
+      const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(sealed.iv), additionalData: new TextEncoder().encode('owner:variational') }, key, new Uint8Array(sealed.cipher));
+      assert.deepEqual(JSON.parse(new TextDecoder().decode(plaintext)), credentials);
+      await assert.rejects(crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(sealed.iv), additionalData: new TextEncoder().encode('owner:bybit') }, key, new Uint8Array(sealed.cipher)));
+
+      fixture({ balance: -50, quote: 0.98 });
+      const negative = await connect();
+      assert.equal(negative.assets.length, initialCount + 1);
+      assert.equal(negative.assets.filter(asset => asset.mode === 'variational').length, 1);
+      assert.equal(rowOf(negative).id, rowOf(zero).id);
+      assert.equal(rowOf(negative).value, -49, 'Negative USDC net equity is retained and converted');
+      assert.equal(rowOf(negative).details[0].quantity, -50);
+      assert.equal(rowOf(negative).details[0].price, 0.98);
+      const savedCipher = encrypted();
+      fixture({ failure: 503 });
+      await connect(replacement, 400);
+      const failedReplacement = await ledger();
+      assert.deepEqual(rowOf(failedReplacement), rowOf(negative));
+      assert.deepEqual(failedReplacement.connections.variational, negative.connections.variational);
+      assert.equal(encrypted(), savedCipher, 'Rejected replacement cannot overwrite the saved session');
+
+      for (const value of [{ failure: 401 }, { failure: 503 }, { portfolio: { balance: null } }, { balance: '300', geckoFailure: true, coinbaseFailure: true }]) {
+        fixture(value);
+        const failed = await forceSync();
+        assertPreserved(rowOf(failed), rowOf(negative));
+        assert.equal(failed.connections.variational.lastSync, negative.connections.variational.lastSync);
+        assert.equal(failed.connections.variational.configured, true);
+        assert.ok(failed.connections.variational.error);
+        assert.ok(rowOf(failed).error);
+        assert.equal(encrypted(), savedCipher);
+      }
+      fixture({ balance: '200', geckoFailure: true, coinbaseRate: '0.5' });
+      const fallback = await forceSync();
+      assert.equal(rowOf(fallback).value, 100, 'Coinbase USDC/USD is used when CoinGecko fails');
+      assert.equal(fallback.connections.variational.error, null);
+
+      for (const suffix of ['', '?include=okx']) {
+        const catalog = await json('/api/hub/trading-connections' + suffix);
+        assert.deepEqual(catalog.connections.map(item => item.exchange), suffix ? ['binance', 'bybit', 'okx'] : ['binance', 'bybit']);
+      }
+      const revision = createHash('sha256').update(savedCipher).digest('hex');
+      for (const exchange of ['variational', 'var']) await json('/api/hub/trading-connections/export', 'POST', { exchange, revision, password }, 400);
+
+      // Simulate older saved rows that predate automatic alias recognition.
+      for (const project of [' VAR ', ' VaRiAtIoNaL ']) {
+        const before = await ledger();
+        const manual = { ...rowOf(before), project, mode: 'manual' };
+        database(db => db.prepare('UPDATE assets SET data=? WHERE owner=? AND id=?').run(JSON.stringify(manual), 'owner', manual.id));
+        fixture({ balance: '88', quote: 0.5 });
+        const reused = await connect();
+        assert.equal(reused.assets.length, initialCount + 1);
+        assert.equal(rowOf(reused).id, manual.id, 'Connection reuses an existing manual Var alias');
+        assert.equal(rowOf(reused).value, 44);
+      }
+      const beforeDuplicate = await ledger();
+      const manual = { ...rowOf(beforeDuplicate), project: 'var', mode: 'manual' };
+      const duplicate = { ...manual, id: 'row-900', cell: 'E900', project: 'variational' };
+      database(db => {
+        db.prepare('UPDATE assets SET data=? WHERE owner=? AND id=?').run(JSON.stringify(manual), 'owner', manual.id);
+        db.prepare('INSERT INTO assets(owner,id,data) VALUES(?,?,?)').run('owner', duplicate.id, JSON.stringify(duplicate));
+      });
+      const duplicateCipher = encrypted();
+      await connect(replacement, 400);
+      const rejectedDuplicate = await ledger();
+      assert.deepEqual(rejectedDuplicate.assets.find(asset => asset.id === manual.id), manual);
+      assert.deepEqual(rejectedDuplicate.assets.find(asset => asset.id === duplicate.id), duplicate);
+      assert.equal(encrypted(), duplicateCipher);
+      database(db => db.prepare('DELETE FROM assets WHERE owner=? AND id=?').run('owner', duplicate.id));
+      const reconnected = await connect();
+      const restartCipher = encrypted();
+      await restart();
+      assert.equal(readFileSync(join(directory, 'config.json'), 'utf8'), configuration);
+      const restored = await ledger();
+      assertPreserved(rowOf(restored), rowOf(reconnected));
+      assert.equal(restored.connections.variational.configured, true);
+      assert.equal(encrypted(), restartCipher);
+      fixture({ balance: '90', quote: 0.5 });
+      const syncedAfterRestart = await forceSync();
+      assert.equal(rowOf(syncedAfterRestart).value, 45, 'Restarted server decrypts the saved session and resumes syncing');
+      assert.equal(syncedAfterRestart.connections.variational.error, null);
+      const disconnected = await json('/api/connections', 'DELETE', { exchange: 'variational' });
+      assert.equal(disconnected.connections.variational.configured, false);
+      assert.equal(disconnected.connections.variational.lastSync, syncedAfterRestart.connections.variational.lastSync);
+      assertPreserved(rowOf(disconnected), rowOf(syncedAfterRestart));
+      assert.equal(encrypted(), undefined);
+      const again = await json('/api/connections', 'DELETE', { exchange: 'variational' });
+      assert.equal(again.assets.length, initialCount + 1);
+      await restart();
+      const restoredDisconnected = await ledger();
+      assert.equal(restoredDisconnected.connections.variational.configured, false);
+      assertPreserved(rowOf(restoredDisconnected), rowOf(disconnected));
+    } else {
+      fixture({ balance: '125', quote: 0.8 });
+      const connected = await connect();
+      assert.equal(rowOf(connected).value, 100, 'Top-level balance is authoritative; P&L, margin and sub-accounts are not added again');
+    }
+
+    const beforeImport = await ledger();
+    const beforeImportCipher = encrypted();
+    const source = sourceFor(sourceAlias);
+    const duplicateSource = structuredClone(source);
+    const baseline = duplicateSource.periods[0];
+    baseline.rows.push({ ...baseline.rows.at(-1), id: 'row-41', cell: 'E41', project: sourceAlias === 'var' ? 'variational' : 'var' });
+    baseline.total = baseline.rowSum = baseline.rows.reduce((sum, asset) => sum + asset.value, 0);
+    baseline.cny = baseline.total * baseline.fx;
+    await json('/api/import', 'POST', { source: duplicateSource, apply: true }, 400);
+    assert.deepEqual(rowOf(await ledger()), rowOf(beforeImport), 'Rejected duplicate source cannot modify the saved amount');
+    const preview = await json('/api/import', 'POST', { source, apply: false });
+    assert.equal(preview.summary.resultingRows, 4);
+    assert.ok(preview.summary.retained.some(value => value.includes('已同步余额')));
+    const imported = await json('/api/import', 'POST', { source, apply: true });
+    assert.equal(imported.ledger.assets.filter(asset => asset.mode === 'variational').length, 1);
+    assert.equal(rowOf(imported.ledger).id, 'row-40');
+    assertPreserved({ ...rowOf(imported.ledger), id: rowOf(beforeImport).id }, rowOf(beforeImport));
+    assert.equal(imported.ledger.connections.variational.lastSync, beforeImport.connections.variational.lastSync);
+    assert.equal(imported.ledger.connections.variational.configured, beforeImport.connections.variational.configured);
+    assert.equal(encrypted(), beforeImportCipher, 'Import retains the exact encrypted session or disconnected state');
+    await restart();
+    const afterImportRestart = await ledger();
+    assert.equal(afterImportRestart.dataKind, 'personal');
+    assertPreserved(rowOf(afterImportRestart), rowOf(imported.ledger));
+    assert.deepEqual(afterImportRestart.connections.variational, imported.ledger.connections.variational);
+    assert.equal(encrypted(), beforeImportCipher);
+    assertNoSecrets(output);
+  } finally {
+    await stop();
+    // Only remove this scenario's freshly created directory, never a supplied path.
+    assert.equal(dirname(resolve(directory)), temporaryRoot);
+    assert.ok(basename(directory).startsWith('asset-var-smoke-'));
+    rmSync(directory, { recursive: true });
+  }
+}
+
+export async function runVariationalSmoke(runtime) {
+  await scenario(runtime, 'var', true);
+  await scenario(runtime, 'variational', false);
+  console.log('Variational production smoke passed: authentication/origin checks, encrypted session isolation, failed verification, zero/negative equity, valuation and quote fallback, failure preservation, aliases/duplicate rejection, source import retention, trading export exclusion, disconnect and restart recovery.');
+}

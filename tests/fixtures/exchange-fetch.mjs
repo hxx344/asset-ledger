@@ -6,10 +6,29 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 const flag = name => existsSync(join(process.env.ASSET_DATA_DIR, name));
+const variationalFixture = () => flag('variational-fixture.json') ? JSON.parse(readFileSync(join(process.env.ASSET_DATA_DIR, 'variational-fixture.json'), 'utf8')) : {};
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input));
+  if (url.hostname === 'omni.variational.io') {
+    assert.equal(url.href, 'https://omni.variational.io/api/portfolio?compute_margin=true');
+    assert.equal(init.method, 'GET');
+    assert.equal(init.redirect, 'manual');
+    assert.equal(init.body, undefined);
+    const cookie = new Headers(init.headers).get('cookie');
+    assert.ok(['vr-token=synthetic-var-token', 'vr-token=synthetic-var-token-replacement'].includes(cookie));
+    const fixture = variationalFixture();
+    if (fixture.failure) return new Response(cookie, { status: fixture.failure === true ? 503 : fixture.failure });
+    return Response.json(fixture.portfolio ?? { balance: fixture.balance ?? '125', upnl: '9000', margin: '8000', sub_accounts: [{ balance: '7000' }] });
+  }
   if (url.hostname === 'api.coinbase.com') {
+    assert.equal(new Headers(init.headers).get('cookie'), null, 'Pricing providers must never receive a session cookie');
+    if (url.searchParams.get('currency') === 'USDC') {
+      assert.equal(url.href, 'https://api.coinbase.com/v2/exchange-rates?currency=USDC');
+      assert.equal(init.method, 'GET');
+      const fixture = variationalFixture();
+      return fixture.coinbaseFailure ? new Response('', { status: 503 }) : Response.json({ data: { currency: 'USDC', rates: { USD: String(fixture.coinbaseRate ?? '1') } } });
+    }
     if (flag('fx-ordering')) {
       const deadline = Date.now() + 3000;
       while (!flag('account-before-fx') && Date.now() < deadline) await delay(10);
@@ -18,9 +37,18 @@ globalThis.fetch = async (input, init = {}) => {
     return flag('fx-failure') ? new Response('', { status: 503 }) : Response.json({ data: { currency: 'USD', rates: { CNY: '7.1234', ...(flag('market-failure') ? {} : { VIRTUAL: '1', USDT: '1', USDC: '1' }) } } });
   }
   if (url.hostname === 'api.frankfurter.dev') return flag('fx-failure') ? new Response('', { status: 503 }) : Response.json({ base: 'USD', quote: 'CNY', rate: 7.11, date: new Date(Date.now() - 86400000).toISOString().slice(0, 10) });
-  if (url.hostname === 'api.coingecko.com') return flag('market-failure') ? Response.json({}) : Response.json(Object.fromEntries(
-    ['virtual-protocol', 'tether', 'usd-coin'].map(id => [id, { usd: 1, last_updated_at: Math.floor(Date.now() / 1000) }]),
-  ));
+  if (url.hostname === 'api.coingecko.com') {
+    assert.equal(new Headers(init.headers).get('cookie'), null, 'Pricing providers must never receive a session cookie');
+    if (url.searchParams.get('ids') === 'usd-coin') {
+      assert.equal(url.href, 'https://api.coingecko.com/api/v3/simple/price?ids=usd-coin&vs_currencies=usd&include_last_updated_at=true');
+      assert.equal(init.method, 'GET');
+      const fixture = variationalFixture();
+      return fixture.geckoFailure ? new Response('', { status: 503 }) : Response.json({ 'usd-coin': { usd: fixture.quote ?? 1, last_updated_at: fixture.quoteAt ?? Math.floor(Date.now() / 1000) } });
+    }
+    return flag('market-failure') ? Response.json({}) : Response.json(Object.fromEntries(
+      ['virtual-protocol', 'tether', 'usd-coin'].map(id => [id, { usd: 1, last_updated_at: Math.floor(Date.now() / 1000) }]),
+    ));
+  }
   if (url.hostname === 'api.binance.com') {
     assert.equal(init.method,'GET');
     assert.equal(init.redirect,'manual');

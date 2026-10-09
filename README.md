@@ -1,6 +1,16 @@
 # 资产统计
 
-个人资产面板，支持 Excel 历史导入、Virtual 实时报价、Bybit / Binance / OKX / Aster 只读同步和手动估值。使用 Next.js、Node.js 24 和 SQLite，无需 Sites、Cloudflare 或外部数据库账号。公开仓库仅含虚构示例数据，不含真实资产记录和凭据。
+个人资产面板，支持 Excel 历史导入、Virtual 实时报价、Bybit / Binance / OKX / Aster / Variational 资产读取和手动估值。使用 Next.js、Node.js 24 和 SQLite，无需 Sites、Cloudflare 或外部数据库账号。公开仓库仅含虚构示例数据，不含真实资产记录和凭据。
+
+## Var / Variational 资产
+
+在“交易所连接”选择 **Var · Variational**，填写登录 [Omni](https://omni.variational.io/) 后浏览器 Cookie 中的 `vr-token` 值（不带 `vr-token=`，无需钱包私钥）。验证成功后加密保存；会话过期时在同一入口更新。该令牌是网页会话，并非交易所限制权限的只读 API Key；本账本只向固定官方地址发送资产 GET 请求，不执行交易、转账或提现，也不向工作台交易模块导出该令牌。
+
+总额采用 Omni `GET /api/portfolio?compute_margin=true` 返回的顶层 `balance`，即网页显示的 Portfolio Value，按 USDC/USD 报价换算美元；不再次叠加未实现盈亏、保证金或子账户分项，不使用 Var 策略的模拟权益。现有 `var` 或 `variational` 资产行会原位更新，首次连接没有对应行才新增；失败和断开保留旧估值及原更新时间，重新导入原表保留已同步资产。
+
+该接口是官方网页内部接口，当前[公开 API 文档](https://docs.variational.io/technical-documentation/api)仅列市场统计。账户字段依据 [Omni 客户端](https://omni.variational.io/_app/immutable/chunks/_rMjg3I8.js)和[资产页面](https://omni.variational.io/_app/immutable/nodes/12.DLyg7qxW.js)的读取方式核实（2026-10-10）；[官方账户说明](https://help.variational.io/en/articles/14765726-making-a-trade-on-omni)定义 Portfolio Value 为账户总价值。接口变化、数据缺失或会话拒绝访问都会报错保留旧值，不填零。接口没有已确认的资产源时间，页面估值时间取账户获取时间与汇率时间的较早者；汇率单独读取 USDC/USD，不依赖 VIRTUAL 行情成功。
+
+本次开发验证使用合成账户响应，实际账户需填写会话后在页面验证。
 
 ## 一键部署
 

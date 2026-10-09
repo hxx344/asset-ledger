@@ -4,6 +4,8 @@ export { db } from './sqlite';
 import { seal, unseal } from './vault';
 import { quotes, syncBybit, syncAster, syncBinance, validateAsterWallet } from './exchanges';
 import { syncOkx } from './okx';
+import { syncVariational } from './variational';
+import { isVariationalProject } from './source-ledger';
 import { editValue, type Credentials, type WithdrawalInput, type AsterAccountInput } from './validation';
 import { asterKey, readAsterAccounts, aggregateAster } from './aster-accounts';
 import { embeddedWithdrawals } from './withdrawals';
@@ -46,7 +48,7 @@ async function readLedger(owner:string,includeHistory:boolean):Promise<Ledger>{
   ledger.assets=rows.results.map(r=>JSON.parse(r.data) as Asset).sort((a,b)=>Number(a.id.slice(4))-Number(b.id.slice(4)));
   ledger.fx=Number(settings.results.find(s=>s.key==='fx')?.value??ledger.fx);
   ledger.fxStatus=JSON.parse(settings.results.find(s=>s.key==='fx-status')?.value??'null')??ledger.fxStatus;
-  for(const name of ['bybit','aster','binance','okx'] as const){
+  for(const name of ['bybit','aster','binance','okx','variational'] as const){
     const meta=settings.results.find(s=>s.key===name+'-status');
     ledger.connections[name]={...ledger.connections[name],...(meta?JSON.parse(meta.value):{}),configured:connectionRows.results.some(r=>r.exchange===name)} as Connection;
   }
@@ -80,7 +82,7 @@ export async function editAsset(owner:string,input:{id:string,quantity:number,pr
   try{
     const ledger=await getCurrentLedger(owner), asset=ledger.assets.find(a=>a.id===input.id);
     if(!asset)throw new Error('未找到该资产');
-    if(asset.mode==='bybit'||asset.mode==='aster'||asset.mode==='binance'||asset.mode==='okx')throw new Error('交易所资产由只读接口维护');
+    if(asset.mode==='bybit'||asset.mode==='aster'||asset.mode==='binance'||asset.mode==='okx'||asset.mode==='variational')throw new Error('交易所资产由只读接口维护');
     const price=asset.mode==='market'?asset.price:input.price;
     const status=asset.mode==='manual'?'手动估值':asset.status;
     const next={...asset,quantity:input.quantity,price,value:editValue(input.quantity,price),status};
@@ -127,24 +129,24 @@ export async function connect(owner:string,input:Credentials){
   await lock(owner);
   try{
     const ledger=await getCurrentLedger(owner);
-    const matches=ledger.assets.filter(a=>a.mode===input.exchange||(['binance','okx'].includes(input.exchange)&&a.mode==='manual'&&a.project.trim().toLowerCase()===input.exchange));
+    const matches=ledger.assets.filter(a=>a.mode===input.exchange||(a.mode==='manual'&&(input.exchange==='variational'?isVariationalProject(a.project):['binance','okx'].includes(input.exchange)&&a.project.trim().toLowerCase()===input.exchange)));
     if(matches.length>1)throw new Error('已有多条交易所资产，请先合并重复记录');
     let asset=matches[0];
     if(!asset){
-      if(input.exchange!=='binance'&&input.exchange!=='okx')throw new Error('未找到交易所资产');
+      if(input.exchange!=='binance'&&input.exchange!=='okx'&&input.exchange!=='variational')throw new Error('未找到交易所资产');
       const nextId=Math.max(0,...ledger.assets.map(a=>Number(a.id.slice(4))))+1;
       if(ledger.assets.length>=1000||!Number.isSafeInteger(nextId)||nextId>999999)throw new Error('资产条目已达到上限');
-      asset={id:'row-'+nextId,project:input.exchange,kind:'资产',quantity:0,price:1,value:0,cell:'E'+nextId,mode:input.exchange,updatedAt:'',status:''};
+      asset={id:'row-'+nextId,project:input.exchange==='variational'?'var':input.exchange,kind:'资产',quantity:0,price:1,value:0,cell:'E'+nextId,mode:input.exchange,updatedAt:'',status:''};
     }
     const encrypted=await seal(input,owner+':'+input.exchange);
-    const result=input.exchange==='okx'?await syncOkx(input):await (async()=>{
+    const result=input.exchange==='variational'?await syncVariational(input):input.exchange==='okx'?await syncOkx(input):await (async()=>{
       const prices=await quotes();
       return input.exchange==='binance'?syncBinance(input,prices):syncBybit(input,prices);
     })();
     const now=new Date().toISOString();
     const updatedAt='updatedAt' in result?result.updatedAt:now;
-    const next={...asset,mode:input.exchange,quantity:result.total,price:1,value:result.total,status:'只读同步',updatedAt,error:undefined,details:result.details};
-    const status={configured:true,lastSync:now,error:null,scope:ledger.connections[input.exchange].scope,label:input.apiKey.slice(-4)};
+    const next={...asset,mode:input.exchange,quantity:result.total,price:1,value:result.total,status:input.exchange==='variational'?'只读同步 · 获取时间':'只读同步',updatedAt,error:undefined,details:result.details};
+    const status={configured:true,lastSync:now,error:null,scope:ledger.connections[input.exchange].scope,...(input.exchange==='variational'?{}:{label:input.apiKey.slice(-4)})};
     // Persist a verified connection and its balance together; failed verification changes neither.
     await db().batch([
       db().prepare('INSERT INTO connections(owner,exchange,encrypted,updated_at) VALUES(?,?,?,?) ON CONFLICT(owner,exchange) DO UPDATE SET encrypted=excluded.encrypted,updated_at=excluded.updated_at').bind(owner,input.exchange,encrypted,now),
@@ -154,7 +156,7 @@ export async function connect(owner:string,input:Credentials){
     await snapshot(owner);return getLedger(owner);
   }finally{await unlock(owner);}
 }
-export async function disconnect(owner:string,exchange:'bybit'|'aster'|'binance'|'okx'){
+export async function disconnect(owner:string,exchange:'bybit'|'aster'|'binance'|'okx'|'variational'){
   if(exchange==='aster')return deleteAsterAccount(owner,'default','disconnect');
   await lock(owner);try{
     const ledger=await getCurrentLedger(owner),asset=ledger.assets.find(a=>a.mode===exchange);
@@ -281,6 +283,22 @@ export async function refresh(owner:string){
         const error=e instanceof Error?e.message:'同步暂时失败';
         if(asset)await saveAsset(owner,{...asset,status:'同步失败 · 保留旧值',error});
         await setting(owner,'okx-status',{...ledger.connections.okx,error});
+      }
+    },async()=>{
+      const row=stored.results.find(row=>row.exchange==='variational');
+      if(!row)return;
+      const asset=ledger.assets.find(a=>a.mode==='variational');
+      try{
+        if(!asset)throw new Error('未找到 Var 资产，请更新连接');
+        const credentials=await unseal(row.encrypted,owner+':variational');
+        const result=await syncVariational(credentials),now=new Date().toISOString();
+        await saveAsset(owner,{...asset,quantity:result.total,price:1,value:result.total,details:result.details,updatedAt:result.updatedAt,status:'只读同步 · 获取时间',error:undefined});
+        await setting(owner,'variational-status',{...ledger.connections.variational,lastSync:now,error:null});
+      }catch(e){
+        // Neither transport nor decryption exceptions may expose session material.
+        const error=e instanceof Error&&e.message.startsWith('Var ')?e.message:'Var 同步失败，请更新会话或稍后重试；已保留上次数据';
+        if(asset)await saveAsset(owner,{...asset,status:'同步失败 · 保留旧值',error});
+        await setting(owner,'variational-status',{...ledger.connections.variational,error});
       }
     },async()=>{
       const [fxResult]=await Promise.allSettled([yuanQuote()]);
