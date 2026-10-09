@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Run only on an isolated, disposable Linux runner: this installs a real service.
 set -Eeuo pipefail
+# Keep source fallback coverage when the public installer defaults to CI archives.
+export PROJECT_DEPLOY_MODE=source
 ROOT=/opt/asset-ledger
 DATA=/var/lib/asset-ledger
 PORT=3179

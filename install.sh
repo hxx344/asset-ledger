@@ -12,7 +12,15 @@ ci_release_resolve() {
   CI_RELEASE_WORK=$workspace
   mkdir -p -- "$workspace" || return 1
   manifest="$workspace/release-manifest.json"
-  if ! curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+  if [[ -n ${PROJECT_DEPLOY_MANIFEST_FILE:-} ]]; then
+    [[ -f "$PROJECT_DEPLOY_MANIFEST_FILE" && ! -L "$PROJECT_DEPLOY_MANIFEST_FILE" &&
+       $(stat -c %u "$PROJECT_DEPLOY_MANIFEST_FILE") == "$EUID" ]] || {
+      printf '[CI] 预检清单不存在或不属于当前安装用户。\n' >&2; return 1;
+    }
+    if [[ "$PROJECT_DEPLOY_MANIFEST_FILE" != "$manifest" ]]; then
+      cp -- "$PROJECT_DEPLOY_MANIFEST_FILE" "$manifest" || return 1
+    fi
+  elif ! curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
     --retry 3 --connect-timeout 15 --max-time 90 --max-filesize 1048576 \
     "https://github.com/$repository/releases/latest/download/release-manifest.json" -o "$manifest"; then
     printf '[CI] %s 暂无可用部署清单或下载失败；现有服务保持原样。\n' "$repository" >&2
@@ -142,7 +150,7 @@ DATA_FILE=''
 BACKUP_KEEP_ARG=''
 BACKUP_KEEP=7
 CLEANUP_ONLY=0
-DEPLOY_MODE=${PROJECT_DEPLOY_MODE:-source}
+DEPLOY_MODE=${PROJECT_DEPLOY_MODE:-ci}
 REBUILD=0
 RELEASE='' NEW_RELEASE='' PREVIOUS='' BACKUP='' DOWNLOAD='' SWITCHED=0 WAS_ACTIVE=0
 CURRENT='' RUNNING='' SOURCE_DIR='' KEEP_RELEASE=''

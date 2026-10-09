@@ -39,7 +39,7 @@ jobs:
         run: |
           bash tests/install-storage.sh
           bash tests/install-incremental.sh
-          node --test tests/release-inputs.test.mjs
+          node --test tests/release-inputs.test.mjs tests/release-publish.test.mjs
           python3 deploy/test-release.py -v
       - uses: actions/upload-artifact@v4
         with:
