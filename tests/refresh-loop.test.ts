@@ -32,12 +32,12 @@ test('inactive old hosts start no sync until activity is granted', t => {
   loop.stop();
 });
 
-test('explicit restore requests replacement while hidden without replacing ordinary interval reads', t => {
+test('explicit restore invokes the existing single-flight sync even before visibility catches up', t => {
   t.mock.timers.enable({ apis: ['setInterval'] });
   const page = Object.assign(new EventTarget(), { hidden: true }), view = new EventTarget();
-  const recoveries: (boolean | undefined)[] = [];
-  const loop = startRefreshLoop({ page, view, enabled: () => true, onActivity: () => {}, refresh: recover => recoveries.push(recover) });
+  let calls = 0;
+  const loop = startRefreshLoop({ page, view, enabled: () => true, onActivity: () => {}, refresh: () => { calls++; } });
   view.dispatchEvent(new Event('focus')); view.dispatchEvent(new Event('pageshow'));
   t.mock.timers.tick(60_000); loop.stop();
-  assert.deepEqual(recoveries, [false, true, true, undefined]);
+  assert.equal(calls, 4);
 });

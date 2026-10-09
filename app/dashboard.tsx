@@ -48,8 +48,7 @@ export default function Dashboard({initial}:{initial:Ledger}){
  const ledgerRef=useRef(initial),activeRef=useRef(false),mountedRef=useRef(false);
  const [importOpen,setImportOpen]=useState(false);
  function toggleImport(open:boolean){importOpenRef.current=open;setImportOpen(open);}
-  const refresh=useCallback(async(manual=false,recover=false)=>{
-   if(recover&&requests.current.cancel(true)){busyRef.current=false;setBusy(false);}
+  const refresh=useCallback(async(manual=false)=>{
   if(busyRef.current||importOpenRef.current||(!manual&&!activeRef.current))return;busyRef.current=true;setBusy(true);
   const controller=requests.current.start(!manual);if(!controller){busyRef.current=false;setBusy(false);return;}
   try{
@@ -71,7 +70,7 @@ export default function Dashboard({initial}:{initial:Ledger}){
    setNow(Date.now());
   };
   const bridge=createHubBridge({onActivity:active=>{const regained=active&&!foreground;foreground=active;loop?.synchronize(regained?new Event('focus'):undefined);},onNavigate:({projectId,query})=>{if(projectId==='asset'&&Object.keys(query).length===0){setView('overview');location.hash='overview';window.scrollTo({top:0});}}});bridgeRef.current=bridge;
-  const loop=startRefreshLoop({page:document,view:window,enabled:()=>bridge.readActive&&navigator.onLine,onActivity,refresh:recover=>void refresh(false,recover)});
+  const loop=startRefreshLoop({page:document,view:window,enabled:()=>bridge.readActive&&navigator.onLine,onActivity,refresh:()=>void refresh()});
   const slot=requests.current;
   return()=>{mountedRef.current=false;loop?.stop();bridge.dispose();bridgeRef.current=null;slot.cancel();historyRequestRef.current?.abort();busyRef.current=false;};
  },[refresh]);

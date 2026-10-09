@@ -4,7 +4,7 @@ type RefreshOptions = {
   view: EventSource;
   enabled: () => boolean;
   onActivity: (active: boolean) => void;
-  refresh: (recover?: boolean) => void;
+  refresh: () => void;
 };
 
 /** Keep the one-minute sync alive in the background; callers own request deduplication. */
@@ -19,7 +19,7 @@ export function startRefreshLoop({ page, view, enabled, onActivity, refresh }: R
     if (!active) { clearInterval(timer); timer = undefined; return; }
     if (timer === undefined) timer = setInterval(() => refresh(), 60_000);
     const restored = Boolean(event && (['focus', 'pageshow', 'online'].includes(event.type) || (event.type === 'visibilitychange' && !page.hidden)));
-    if (!previous || restored) refresh(restored);
+    if (!previous || restored) refresh();
   };
   page.addEventListener('visibilitychange', synchronize);
   for (const type of ['online', 'offline', 'focus', 'pageshow']) view.addEventListener(type, synchronize);
