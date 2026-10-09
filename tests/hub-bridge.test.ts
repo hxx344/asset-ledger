@@ -23,8 +23,11 @@ test('bridge handshakes both ways, ignores forged messages, handles navigation a
   const bridge = createHubBridge({ onActivity: active => activities.push(active), onNavigate: navigation => navigations.push(navigation.projectId) }, target as unknown as Window);
   const receive = (data: Record<string, unknown>, origin = 'https://hub.localhost', source: unknown = parent) => listener?.({ data: { channel: 'project-hub', version: 1, ...data }, origin, source } as MessageEvent);
   assert.equal(bridge.active, false);
+  assert.equal(bridge.readActive, false);
   assert.equal(sent[0].message.role, 'module');
   assert.deepEqual(sent[0].message.capabilities, ['activity', 'changed', 'navigate']);
+  receive({ type: 'activity', active: false, backgroundUpdates: true });
+  assert.equal(bridge.readActive, false, 'A proxy frame waits for a trusted handshake');
   receive({ type: 'ready', role: 'host' });
   assert.equal(sent.length, 2);
   receive({ type: 'activity', active: true }, 'https://evil.test');
@@ -35,6 +38,14 @@ test('bridge handshakes both ways, ignores forged messages, handles navigation a
   assert.equal(bridge.active, true);
   receive({ type: 'activity', active: false });
   assert.deepEqual(activities, [true, false]);
+  assert.equal(bridge.readActive, false, 'Old hosts keep their explicit inactive behavior');
+  receive({ type: 'activity', active: false, backgroundUpdates: true }, 'https://evil.test');
+  assert.equal(bridge.readActive, false);
+  receive({ type: 'activity', active: false, backgroundUpdates: true });
+  assert.equal(bridge.active, false, 'Background read permission never grants foreground activity');
+  assert.equal(bridge.readActive, true);
+  receive({ type: 'activity', active: false, backgroundUpdates: 'true' });
+  assert.equal(bridge.readActive, false);
   receive({ type: 'navigate', projectId: 'asset', query: {} });
   receive({ type: 'navigate', projectId: 'asset', query: { walletAddress: {} } });
   assert.deepEqual(navigations, ['asset']);
@@ -42,6 +53,7 @@ test('bridge handshakes both ways, ignores forged messages, handles navigation a
   assert.deepEqual(sent.at(-1)?.message, { channel: 'project-hub', version: 1, type: 'changed', scope: 'summary' });
   assert.ok(sent.every(item => item.origin === 'https://hub.localhost'));
   bridge.dispose(); bridge.changed();
+  assert.equal(bridge.readActive, false);
   assert.equal(listener, undefined);
   assert.equal(sent.length, 3);
 });

@@ -16,6 +16,7 @@ import { assetMeasures, embeddedWithdrawals, chinaDay, periodMeasures } from '@/
 import { createHubBridge } from '@/lib/hub-bridge';
 import { requestJson, createRequestSlot } from '@/lib/client-request';
 import { nextLedgerExpiry } from '@/lib/client-freshness';
+import { startRefreshLoop } from '@/lib/refresh-loop';
 
 const money=(n:number,d=2)=>n.toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
 const stamp=(s:string|null)=>s?new Date(s).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'尚未同步';
@@ -62,21 +63,19 @@ export default function Dashboard({initial}:{initial:Ledger}){
  },[]);
  useEffect(()=>{
   mountedRef.current=true;
-  let timer:ReturnType<typeof setInterval>|undefined;
-  const update=()=>{
-   const wasActive=activeRef.current;activeRef.current=!!bridgeRef.current?.active&&document.visibilityState==='visible'&&navigator.onLine;
-   if(timer!==undefined){clearInterval(timer);timer=undefined;}
+  let foreground=false;
+  const onActivity=(active:boolean)=>{
+   activeRef.current=active;
    if(!activeRef.current&&requests.current.cancel(true)){busyRef.current=false;setBusy(false);}
-   if(activeRef.current){if(!wasActive)void refresh();timer=setInterval(()=>void refresh(),60000);}
    setNow(Date.now());
   };
-  const bridge=createHubBridge({onActivity:update,onNavigate:({projectId,query})=>{if(projectId==='asset'&&Object.keys(query).length===0){setView('overview');location.hash='overview';window.scrollTo({top:0});}}});bridgeRef.current=bridge;
-  update();document.addEventListener('visibilitychange',update);window.addEventListener('online',update);window.addEventListener('offline',update);
+  const bridge=createHubBridge({onActivity:active=>{const regained=active&&!foreground;foreground=active;loop?.synchronize(regained?new Event('focus'):undefined);},onNavigate:({projectId,query})=>{if(projectId==='asset'&&Object.keys(query).length===0){setView('overview');location.hash='overview';window.scrollTo({top:0});}}});bridgeRef.current=bridge;
+  const loop=startRefreshLoop({page:document,view:window,enabled:()=>bridge.readActive&&navigator.onLine,onActivity,refresh:()=>void refresh()});
   const slot=requests.current;
-  return()=>{mountedRef.current=false;activeRef.current=false;bridge.dispose();bridgeRef.current=null;if(timer!==undefined)clearInterval(timer);document.removeEventListener('visibilitychange',update);window.removeEventListener('online',update);window.removeEventListener('offline',update);slot.cancel();historyRequestRef.current?.abort();busyRef.current=false;};
+  return()=>{mountedRef.current=false;loop?.stop();bridge.dispose();bridgeRef.current=null;slot.cancel();historyRequestRef.current?.abort();busyRef.current=false;};
  },[refresh]);
  useEffect(()=>{
-  if(document.hidden||!bridgeRef.current?.active)return;
+  if(!bridgeRef.current?.readActive)return;
   const time=Date.now(),next=nextLedgerExpiry(ledger,time);
   if(next===null)return;
   const timer=setTimeout(()=>setNow(Date.now()),Math.min(next-time,2_147_483_647));

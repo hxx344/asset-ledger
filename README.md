@@ -201,3 +201,5 @@ Schema 位于 `db/schema.ts`，`npm run db:generate` 生成增量迁移。迁移
 - [Frankfurter 汇率与 ECB 来源筛选](https://frankfurter.dev/)
 
 真实 Bybit / Binance / OKX / Aster 账户需在页面填写对应凭据后验证，测试使用临时生成的测试钱包和合成账户数据。
+
+页面已打开时，资产自动同步在浏览器后台或平台其他模块中仍按 60 秒运行；恢复前台、网络连接或历史页面时会立即补查。嵌入平台时，后台同步仅由可信平台的 backgroundUpdates 许可启用，旧平台仍按原活动状态控制。离线、页面卸载、编辑或导入期间保留现有暂停及请求互斥。浏览器休眠期间无法保证固定节拍。

@@ -13,6 +13,7 @@ export function createHubBridge(callbacks: Callbacks, target: Window = window) {
   // Proxy frames wait for the host's initial activity decision, even if the
   // iframe loads before the dashboard effect has registered its listener.
   let active = !origin;
+  let connected = !origin, backgroundUpdates = !origin;
   const send = (message: Record<string, unknown>) => {
     if (origin && !disposed) target.parent.postMessage({ channel: CHANNEL, version: 1, ...message }, origin);
   };
@@ -21,17 +22,19 @@ export function createHubBridge(callbacks: Callbacks, target: Window = window) {
     if (!origin || event.source !== target.parent || event.origin !== origin || !event.data || typeof event.data !== 'object') return;
     const message = event.data;
     if (message.channel !== CHANNEL || message.version !== 1) return;
-    if (message.type === 'ready' && message.role === 'host') ready();
-    else if (message.type === 'activity' && typeof message.active === 'boolean') {
+    if (message.type === 'ready' && message.role === 'host') { connected = true; ready(); }
+    else if (connected && message.type === 'activity' && typeof message.active === 'boolean') {
       active = message.active;
+      backgroundUpdates = message.backgroundUpdates === true;
       callbacks.onActivity(active);
-    } else if (message.type === 'navigate' && typeof message.projectId === 'string' && message.query && typeof message.query === 'object' && !Array.isArray(message.query) && Object.values(message.query).every(value => typeof value === 'string')) {
+    } else if (connected && message.type === 'navigate' && typeof message.projectId === 'string' && message.query && typeof message.query === 'object' && !Array.isArray(message.query) && Object.values(message.query).every(value => typeof value === 'string')) {
       callbacks.onNavigate?.({ projectId: message.projectId, query: message.query });
     }
   };
   if (origin) { target.addEventListener('message', receive); ready(); }
   return {
     get active() { return active; },
+    get readActive() { return !disposed && connected && (backgroundUpdates || (active && !target.document?.hidden)); },
     changed: () => send({ type: 'changed', scope: 'summary' }),
     dispose() { disposed = true; if (origin) target.removeEventListener('message', receive); },
   };
