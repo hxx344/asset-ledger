@@ -3,6 +3,8 @@ import type { Balance } from './types';
 export type VariationalCredential = { vrToken: string };
 type Json = Record<string, unknown>;
 const PORTFOLIO = 'https://omni.variational.io/api/portfolio?compute_margin=true';
+// Match Var Grid's default session client; this does not complete browser challenges.
+const GRID_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36';
 const COINGECKO = 'https://api.coingecko.com/api/v3/simple/price?ids=usd-coin&vs_currencies=usd&include_last_updated_at=true';
 const COINBASE = 'https://api.coinbase.com/v2/exchange-rates?currency=USDC';
 const INVALID = 'Var 返回的账户数据不完整或数值无效；已保留上次数据';
@@ -99,7 +101,13 @@ async function usdcQuote(fetcher: typeof fetch): Promise<{ price: number; at: nu
 export async function syncVariational(c: VariationalCredential, fetcher: typeof fetch = fetch): Promise<{ total: number; details: Balance[]; updatedAt: string }> {
   if (typeof c?.vrToken !== 'string' || c.vrToken.length < 5 || c.vrToken.length > 4096 || !/^[A-Za-z0-9._~-]+$/.test(c.vrToken)) throw new Error('Var 请填写单个 vr-token 值，不要填写完整 Cookie');
   // vr-token is a full web session, not a read-only API key. The application only reads this portfolio.
-  const portfolio = await read(PORTFOLIO, { Accept: 'application/json', 'Content-Type': 'application/json', Cookie: 'vr-token=' + c.vrToken }, fetcher);
+  const portfolio = await read(PORTFOLIO, {
+    Accept: 'application/json',
+    'User-Agent': GRID_USER_AGENT,
+    Referer: 'https://omni.variational.io/',
+    'Cache-Control': 'no-cache',
+    Cookie: 'vr-token=' + c.vrToken,
+  }, fetcher);
   const fetchedAt = Date.now();
   const quantity = decimal(portfolio.balance);
   // Omni's portfolio header uses balance directly, including all sub-accounts and unrealized P&L.

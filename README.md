@@ -17,7 +17,7 @@
 - **HTTP 403**：官网拒绝服务器访问，尚不能确认是令牌失效；不会仅凭 403 或 Cloudflare 服务标识推断为浏览器验证。
 - **异常网页或超时**：未收到可用账户数据，保留旧估值和原更新时间，后续刷新可重试。
 
-请求格式已按 [Omni 请求封装](https://omni.variational.io/_app/immutable/chunks/B2Dt0Djp.js)补齐 JSON 内容类型；没有添加浏览器依赖，也不声称补齐请求头可以解除 Cloudflare 验证。账户是否能够持续从服务器读取，仍以部署端携带有效会话的实际结果为准。
+资产 GET 请求头与 Var Grid 的默认会话客户端对齐：使用相同的 `User-Agent`、`Accept`、`Referer`、`Cache-Control` 和单个 `vr-token` Cookie；无请求体的 GET 不发送 `Content-Type`。Asset 仍使用 Node.js 网络客户端，没有添加 Python 或浏览器依赖，底层网络行为不等同于 Grid 的 Python 客户端。请求头对齐不保证解除 Cloudflare 验证，账户是否能够持续从服务器读取，仍以部署端携带有效会话的实际结果为准。
 
 本次开发验证使用合成账户响应，实际账户需填写会话后在页面验证。
 

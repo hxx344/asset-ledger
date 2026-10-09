@@ -11,11 +11,18 @@ function fixture(portfolio: unknown = { balance: '125' }, options: { price?: num
     assert.equal(init.body, undefined); assert.ok(init.signal instanceof AbortSignal);
     if (url.hostname === 'omni.variational.io') {
       assert.equal(url.href, 'https://omni.variational.io/api/portfolio?compute_margin=true');
-      assert.equal(new Headers(init.headers).get('cookie'), 'vr-token=' + credential.vrToken);
-      assert.equal(new Headers(init.headers).get('content-type'), 'application/json');
+      assert.deepEqual(Object.fromEntries(new Headers(init.headers)), {
+        accept: 'application/json',
+        'cache-control': 'no-cache',
+        cookie: 'vr-token=' + credential.vrToken,
+        referer: 'https://omni.variational.io/',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36',
+      });
       return Response.json(portfolio);
     }
     assert.equal(new Headers(init.headers).has('cookie'), false);
+    assert.equal(new Headers(init.headers).has('referer'), false);
+    assert.equal(new Headers(init.headers).has('user-agent'), false);
     assert.equal(JSON.stringify(init).includes(credential.vrToken), false);
     if (url.hostname === 'api.coingecko.com') {
       assert.equal(url.searchParams.get('ids'), 'usd-coin');
