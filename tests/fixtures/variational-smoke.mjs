@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -16,7 +16,7 @@ const replacement = { exchange: 'variational', vrToken: 'synthetic-var-token-rep
 const password = 'synthetic-var-password-12345';
 const rowOf = ledger => ledger.assets.find(asset => asset.mode === 'variational');
 const assertNoSecrets = text => {
-  for (const value of [credentials.vrToken, replacement.vrToken]) assert.equal(text.includes(value), false, 'Session values cannot appear in responses or logs');
+  for (const value of [credentials.vrToken, replacement.vrToken, 'synthetic-var-returned-token', 'PRIVATE_DIAGNOSTIC_ACCOUNT']) assert.equal(text.includes(value), false, 'Session values cannot appear in responses or logs');
 };
 const diagnosticCases = [
   { fixture: { failure: 401 }, kind: 'unauthorized' },
@@ -68,6 +68,23 @@ async function scenario(runtime, sourceAlias, full) {
     try { return action(db); } finally { db.close(); }
   };
   const encrypted = () => database(db => db.prepare("SELECT encrypted FROM connections WHERE owner='owner' AND exchange='variational'").get()?.encrypted);
+  const diagnosticRequests = () => {
+    const file = join(directory, 'variational-diagnostic-requests.jsonl');
+    return existsSync(file) ? readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : [];
+  };
+  const assertReport = (report, portfolioOutcome) => {
+    assert.deepEqual(Object.keys(report).sort(), ['checkedAt', 'client', 'results']);
+    assert.equal(report.client, 'asset-node');
+    assert.ok(Number.isFinite(Date.parse(report.checkedAt)));
+    assert.deepEqual(report.results.map(result => [result.endpoint, result.path, result.outcome]), [
+      ['session', '/api/me', 'ok'], ['portfolio', '/api/portfolio?compute_margin=true', portfolioOutcome],
+    ]);
+    for (const result of report.results) {
+      assert.deepEqual(Object.keys(result).sort(), ['challenge', 'contentType', 'elapsedMs', 'endpoint', 'outcome', 'path', 'status', 'structureOk']);
+      assert.ok(Number.isFinite(result.elapsedMs) && result.elapsedMs >= 0);
+    }
+    assertNoSecrets(JSON.stringify(report));
+  };
   async function start() {
     const reservation = createServer();
     await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
@@ -119,6 +136,7 @@ async function scenario(runtime, sourceAlias, full) {
   try {
     await start();
     for (const method of ['POST', 'DELETE']) await json('/api/connections', method, credentials, 401);
+    if (full) await json('/api/connections/variational-test', 'POST', { vrToken: credentials.vrToken }, 401);
     const login = await request('/api/login', 'POST', { password });
     assert.equal(login.status, 200);
     cookie = login.headers.get('set-cookie').split(';')[0];
@@ -129,6 +147,30 @@ async function scenario(runtime, sourceAlias, full) {
     for (const method of ['POST', 'DELETE']) await json('/api/connections', method, credentials, 403, { origin: 'https://untrusted.example' });
 
     if (full) {
+      const diagnosticPath = '/api/connections/variational-test';
+      fixture({ diagnosticOnly: true, challenge: true, status: 403 });
+      await json(diagnosticPath, 'POST', { vrToken: credentials.vrToken }, 403, { origin: 'https://untrusted.example' });
+      await json(diagnosticPath, 'POST', { vrToken: credentials.vrToken }, 400, { 'Content-Type': 'text/plain' });
+      for (const body of [
+        { vrToken: 123 }, { vrToken: '' }, { vrToken: credentials.vrToken, exchange: 'variational' },
+        { vrToken: credentials.vrToken, url: 'https://untrusted.example' }, { vrToken: 'a'.repeat(9000) },
+      ]) await json(diagnosticPath, 'POST', body, 400);
+      assert.deepEqual(diagnosticRequests(), [], 'Rejected diagnostics cannot make any upstream request');
+      const diagnostic = await json(diagnosticPath, 'POST', { vrToken: credentials.vrToken });
+      assertReport(diagnostic, 'challenge');
+      assert.equal(diagnostic.results[0].structureOk, true);
+      assert.equal(diagnostic.results[1].status, 403);
+      assert.equal(diagnostic.results[1].challenge, true);
+      assert.equal(diagnostic.results[1].structureOk, null);
+      assert.deepEqual(diagnosticRequests().sort(), ['/api/me', '/api/portfolio?compute_margin=true']);
+      const afterDiagnostic = await ledger();
+      assert.deepEqual(afterDiagnostic.assets, initial.assets, 'Diagnostics cannot create or modify ledger assets');
+      assert.deepEqual(afterDiagnostic.connections, initial.connections);
+      assert.equal(encrypted(), undefined, 'A diagnostic cannot save the supplied session');
+      const limited = await json(diagnosticPath, 'POST', { vrToken: credentials.vrToken }, 429);
+      assert.deepEqual(Object.keys(limited), ['error']);
+      assert.equal(diagnosticRequests().length, 2, 'Cooldown cannot make extra upstream requests');
+
       for (const invalid of [
         { ...credentials, vrToken: '' }, { ...credentials, vrToken: 'vr-token=' + credentials.vrToken },
         { ...credentials, vrToken: credentials.vrToken + '; extra=value' },
@@ -170,6 +212,16 @@ async function scenario(runtime, sourceAlias, full) {
       assert.equal(rowOf(negative).details[0].quantity, -50);
       assert.equal(rowOf(negative).details[0].price, 0.98);
       const savedCipher = encrypted();
+      await restart();
+      fixture({ diagnosticOnly: true, balance: '982174.625' });
+      const healthyDiagnostic = await json(diagnosticPath, 'POST', { vrToken: replacement.vrToken });
+      assertReport(healthyDiagnostic, 'ok');
+      assert.equal(JSON.stringify(healthyDiagnostic).includes('982174.625'), false, 'Diagnostics cannot return account values');
+      assert.deepEqual(diagnosticRequests().slice(2).sort(), ['/api/me', '/api/portfolio?compute_margin=true']);
+      const unchanged = await ledger();
+      assert.deepEqual(rowOf(unchanged), rowOf(negative), 'Diagnostic success cannot modify amounts, details or updatedAt');
+      assert.deepEqual(unchanged.connections.variational, negative.connections.variational);
+      assert.equal(encrypted(), savedCipher, 'Testing a replacement token cannot replace the encrypted connection');
       for (const item of [...diagnosticCases, { fixture: { failure: 503 } }]) {
         fixture(item.fixture);
         const error = await connect(replacement, 400);
@@ -301,5 +353,5 @@ async function scenario(runtime, sourceAlias, full) {
 export async function runVariationalSmoke(runtime) {
   await scenario(runtime, 'var', true);
   await scenario(runtime, 'variational', false);
-  console.log('Variational production smoke passed: authentication/origin checks, encrypted session isolation, challenge/401/403/HTML diagnostics, failed verification, zero/negative equity, valuation and quote fallback, failure preservation, aliases/duplicate rejection, source import retention, trading export exclusion, disconnect and restart recovery.');
+  console.log('Variational production smoke passed: authentication/origin checks, transient two-endpoint diagnostics and cooldown, encrypted session isolation, challenge/401/403/HTML diagnostics, failed verification, zero/negative equity, valuation and quote fallback, failure preservation, aliases/duplicate rejection, source import retention, trading export exclusion, disconnect and restart recovery.');
 }

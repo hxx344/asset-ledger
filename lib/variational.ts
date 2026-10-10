@@ -33,6 +33,21 @@ function decimal(value: unknown): number {
   return result === 0 ? 0 : result;
 }
 
+export function hasValidVariationalBalance(value: unknown): boolean {
+  try { decimal(value); return true; } catch { return false; }
+}
+
+export function variationalRequestHeaders(c: VariationalCredential): Record<string, string> {
+  if (typeof c?.vrToken !== 'string' || c.vrToken.length < 5 || c.vrToken.length > 4096 || !/^[A-Za-z0-9._~-]+$/.test(c.vrToken)) throw new Error('Var 请填写单个 vr-token 值，不要填写完整 Cookie');
+  return {
+    Accept: 'application/json',
+    'User-Agent': GRID_USER_AGENT,
+    Referer: 'https://omni.variational.io/',
+    'Cache-Control': 'no-cache',
+    Cookie: 'vr-token=' + c.vrToken,
+  };
+}
+
 // Only these fixed GET URLs are reachable; credentials are never sent to pricing providers.
 async function read(url: string, headers: Record<string, string>, fetcher: typeof fetch): Promise<Json> {
   try {
@@ -99,15 +114,8 @@ async function usdcQuote(fetcher: typeof fetch): Promise<{ price: number; at: nu
 }
 
 export async function syncVariational(c: VariationalCredential, fetcher: typeof fetch = fetch): Promise<{ total: number; details: Balance[]; updatedAt: string }> {
-  if (typeof c?.vrToken !== 'string' || c.vrToken.length < 5 || c.vrToken.length > 4096 || !/^[A-Za-z0-9._~-]+$/.test(c.vrToken)) throw new Error('Var 请填写单个 vr-token 值，不要填写完整 Cookie');
   // vr-token is a full web session, not a read-only API key. The application only reads this portfolio.
-  const portfolio = await read(PORTFOLIO, {
-    Accept: 'application/json',
-    'User-Agent': GRID_USER_AGENT,
-    Referer: 'https://omni.variational.io/',
-    'Cache-Control': 'no-cache',
-    Cookie: 'vr-token=' + c.vrToken,
-  }, fetcher);
+  const portfolio = await read(PORTFOLIO, variationalRequestHeaders(c), fetcher);
   const fetchedAt = Date.now();
   const quantity = decimal(portfolio.balance);
   // Omni's portfolio header uses balance directly, including all sub-accounts and unrealized P&L.

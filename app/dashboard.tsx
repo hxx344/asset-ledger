@@ -12,6 +12,8 @@ import { ImportLedgerDialog } from './import-ledger-dialog';
 import { AssetTrend } from './asset-trend';
 import { WithdrawalsPanel } from './withdrawals-panel';
 import { AsterAccountsPanel } from './aster-accounts-panel';
+import { VariationalDiagnostics } from './variational-diagnostics';
+import type { VariationalDiagnosticReport } from '@/lib/variational-diagnostic-types';
 import { assetMeasures, embeddedWithdrawals, chinaDay, periodMeasures } from '@/lib/withdrawals';
 import { createHubBridge } from '@/lib/hub-bridge';
 import { requestJson, createRequestSlot } from '@/lib/client-request';
@@ -41,9 +43,11 @@ export default function Dashboard({initial}:{initial:Ledger}){
  const [editing,setEditing]=useState<Asset|null>(null),[quantity,setQuantity]=useState(''),[price,setPrice]=useState('');
  const [fxOpen,setFxOpen]=useState(false),[fx,setFx]=useState(String(initial.fx)),[formError,setFormError]=useState('');
  const [connectTo,setConnectTo]=useState<Exclude<Exchange,'aster'>|null>(null),[key,setKey]=useState(''),[secret,setSecret]=useState(''),[passphrase,setPassphrase]=useState(''),[vrToken,setVrToken]=useState(''),[region,setRegion]=useState('global');
+ const [diagnosticReport,setDiagnosticReport]=useState<VariationalDiagnosticReport|null>(null),[diagnosticError,setDiagnosticError]=useState(''),[diagnosticRunning,setDiagnosticRunning]=useState(false);
  const [detail,setDetail]=useState<Asset|null>(null),[period,setPeriod]=useState<Period|null>(null),[periodRows,setPeriodRows]=useState<Asset[]>([]);
  const busyRef=useRef(false),importOpenRef=useRef(false);
  const bridgeRef=useRef<ReturnType<typeof createHubBridge>|null>(null),historyRequestRef=useRef<AbortController|null>(null);
+ const diagnosticRequestRef=useRef<AbortController|null>(null);
  const requests=useRef(createRequestSlot());
  const ledgerRef=useRef(initial),activeRef=useRef(false),mountedRef=useRef(false);
  const [importOpen,setImportOpen]=useState(false);
@@ -72,7 +76,7 @@ export default function Dashboard({initial}:{initial:Ledger}){
   const bridge=createHubBridge({onActivity:active=>{const regained=active&&!foreground;foreground=active;loop?.synchronize(regained?new Event('focus'):undefined);},onNavigate:({projectId,query})=>{if(projectId==='asset'&&Object.keys(query).length===0){setView('overview');location.hash='overview';window.scrollTo({top:0});}}});bridgeRef.current=bridge;
   const loop=startRefreshLoop({page:document,view:window,enabled:()=>bridge.readActive&&navigator.onLine,onActivity,refresh:()=>void refresh()});
   const slot=requests.current;
-  return()=>{mountedRef.current=false;loop?.stop();bridge.dispose();bridgeRef.current=null;slot.cancel();historyRequestRef.current?.abort();busyRef.current=false;};
+  return()=>{mountedRef.current=false;loop?.stop();bridge.dispose();bridgeRef.current=null;slot.cancel();diagnosticRequestRef.current=null;historyRequestRef.current?.abort();busyRef.current=false;};
  },[refresh]);
  useEffect(()=>{
   if(!bridgeRef.current?.readActive)return;
@@ -100,8 +104,29 @@ export default function Dashboard({initial}:{initial:Ledger}){
   finally{if(requests.current.finish(controller)){busyRef.current=false;if(mountedRef.current){setBusy(false);setNow(Date.now());}}}
  }
  function edit(a:Asset){setEditing(a);setQuantity(String(a.quantity??0));setPrice(a.price===null?'':String(a.price));setFormError('');}
- function closeConnection(){setConnectTo(null);setKey('');setSecret('');setPassphrase('');setVrToken('');}
- function connection(exchange:Exchange){if(exchange==='aster'){navigate('connections');return;}setConnectTo(exchange);setKey('');setSecret('');setPassphrase('');setVrToken('');setFormError('');}
+ function clearDiagnostic(){
+  const controller=diagnosticRequestRef.current;diagnosticRequestRef.current=null;
+  if(controller){controller.abort();if(requests.current.finish(controller)){busyRef.current=false;if(mountedRef.current)setBusy(false);}}
+  setDiagnosticReport(null);setDiagnosticError('');setDiagnosticRunning(false);
+ }
+ async function testVariationalAccess(){
+  if(busyRef.current||connectTo!=='variational'||vrToken.trim().length<5)return;
+  busyRef.current=true;setBusy(true);
+  const controller=requests.current.start();if(!controller){busyRef.current=false;setBusy(false);return;}
+  diagnosticRequestRef.current=controller;setDiagnosticRunning(true);setDiagnosticReport(null);setDiagnosticError('');setFormError('');
+  try{
+   const report=await requestJson<VariationalDiagnosticReport>('/api/connections/variational-test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vrToken:vrToken.trim()}),signal:controller.signal,timeoutMs:30_000});
+   if(controller.signal.aborted||!mountedRef.current||diagnosticRequestRef.current!==controller)return;
+   setDiagnosticReport(report);
+  }
+  catch(e){if(!controller.signal.aborted&&mountedRef.current&&diagnosticRequestRef.current===controller)setDiagnosticError(e instanceof Error&&e.name==='TimeoutError'?'测试超时，请稍后重试':e instanceof Error?e.message:'测试失败，请稍后重试');}
+  finally{
+   if(diagnosticRequestRef.current===controller){diagnosticRequestRef.current=null;if(mountedRef.current)setDiagnosticRunning(false);}
+   if(requests.current.finish(controller)){busyRef.current=false;if(mountedRef.current)setBusy(false);}
+  }
+ }
+ function closeConnection(){clearDiagnostic();setConnectTo(null);setKey('');setSecret('');setPassphrase('');setVrToken('');}
+ function connection(exchange:Exchange){clearDiagnostic();if(exchange==='aster'){navigate('connections');return;}setConnectTo(exchange);setKey('');setSecret('');setPassphrase('');setVrToken('');setFormError('');}
  async function openPeriod(p:Period){
   historyRequestRef.current?.abort();const controller=new AbortController();historyRequestRef.current=controller;
   setPeriod(p);setPeriodRows([]);setFormError('');
@@ -161,7 +186,7 @@ export default function Dashboard({initial}:{initial:Ledger}){
  <Dialog open={fxOpen} onOpenChange={setFxOpen}><DialogContent><DialogHeader><DialogTitle>人民币换算汇率</DialogTitle><DialogDescription>每 60 秒随资产自动更新。可临时设置备用值，下一次自动获取成功后会覆盖；历史快照保留当时汇率。</DialogDescription></DialogHeader><p className="help">当前来源：{fxSource}<br/>{ledger.fxStatus.rateDate?'报价日期：'+ledger.fxStatus.rateDate:'获取时间：'+stamp(ledger.fxStatus.fetchedAt)}<br/>来源未提供逐笔报价时间时，展示获取时间。</p><form className="form-grid" onSubmit={e=>{e.preventDefault();void mutate('/api/ledger','PATCH',{fx:Number(fx)},()=>setFxOpen(false));}}><label>1 USD 折合 CNY<input type="number" min="0.001" step="any" required value={fx} onChange={e=>setFx(e.target.value)}/></label>{formError&&<p className="error-text" role="alert">{formError}</p>}<button className="button primary" disabled={busy}>临时使用此汇率</button></form></DialogContent></Dialog>
  <Dialog open={!!connectTo} onOpenChange={v=>{if(!v)closeConnection();}}><DialogContent><DialogHeader><DialogTitle>连接 {connectTo?exchangeNames[connectTo]:''}</DialogTitle><DialogDescription>{connectTo==='variational'?'通过 Omni 网页会话读取账户净权益，成功后加密保存令牌。':'验证只读权限与余额，成功后加密保存。'}</DialogDescription></DialogHeader>
   <form className="form-grid" onSubmit={e=>{e.preventDefault();if(!connectTo)return;const credentials=connectTo==='variational'?{exchange:connectTo,vrToken:vrToken.trim()}:{exchange:connectTo,apiKey:key.trim(),apiSecret:secret.trim(),...(connectTo==='bybit'?{region}:connectTo==='okx'?{passphrase:passphrase.trim()}:{})};void mutate('/api/connections','POST',credentials,closeConnection);}}>
-   {connectTo==='variational'?<label>vr-token<input type="password" autoComplete="new-password" spellCheck={false} autoCapitalize="none" required minLength={5} maxLength={4096} value={vrToken} onChange={e=>setVrToken(e.target.value)}/><span className="help">登录 Omni 网页后，从浏览器 Cookie 中复制 vr-token 的值；只填写值，不带 vr-token= 或完整 Cookie，无需钱包私钥。</span></label>:<>
+  {connectTo==='variational'?<label>vr-token<input type="password" autoComplete="new-password" spellCheck={false} autoCapitalize="none" required minLength={5} maxLength={4096} value={vrToken} onChange={e=>{clearDiagnostic();setVrToken(e.target.value);setFormError('');}}/><span className="help">登录 Omni 网页后，从浏览器 Cookie 中复制 vr-token 的值；只填写值，不带 vr-token= 或完整 Cookie，无需钱包私钥。</span></label>:<>
    <label>API Key<input autoComplete="off" spellCheck={false} autoCapitalize="none" required value={key} onChange={e=>setKey(e.target.value)}/></label>
    <label>API Secret<input type="password" autoComplete="new-password" spellCheck={false} autoCapitalize="none" required value={secret} onChange={e=>setSecret(e.target.value)}/></label>
    </>}
@@ -169,7 +194,8 @@ export default function Dashboard({initial}:{initial:Ledger}){
    {connectTo==='bybit'&&<label>账户地区<Select value={region} onValueChange={setRegion}><SelectTrigger aria-label="账户地区"><SelectValue/></SelectTrigger><SelectContent>{[['global','国际站'],['nl','荷兰'],['tr','土耳其'],['kz','哈萨克斯坦'],['ge','格鲁吉亚'],['ae','阿联酋'],['eu','欧洲']].map(([v,l])=><SelectItem key={v} value={v}>{l}</SelectItem>)}</SelectContent></Select></label>}
    <p className="help">{connectTo==='variational'?'vr-token 是网页会话凭据，并非只读 API Key。本账本仅通过 GET 请求读取资产；会话过期后需重新登录 Omni 并更新令牌。若提示 Cloudflare 浏览器验证，表示服务器请求被拦截，不能据此判断令牌失效。':connectTo==='okx'?'仅支持 OKX 国际站实盘 API。只开启读取权限，关闭交易与提现权限；验证账户总资产成功后保存。':connectTo==='binance'?'仅支持 Binance 国际站 HMAC API。开启读取权限，关闭交易、划转和提现等写入权限；首次验证成功后才保存连接与资产估值。':'HMAC 类型只读 API，需要账户与资产读取权限；不读取子账户及理财产品。'}</p>
    {formError&&<p className="error-text" role="alert">{formError}</p>}
-   <div className="form-actions">{connectTo&&ledger.connections[connectTo].configured&&<button type="button" className="button" disabled={busy} onClick={()=>void mutate('/api/connections','DELETE',{exchange:connectTo},closeConnection)}>断开并保留估值</button>}<button className="button primary" disabled={busy}>{busy?'验证中…':'验证并连接'}</button></div>
+  {connectTo==='variational'&&<section className="variational-diagnostic" aria-label="Var 访问诊断"><div className="diagnostic-action"><button type="button" className="button" disabled={busy||vrToken.trim().length<5} onClick={()=>void testVariationalAccess()}>{diagnosticRunning?<><RefreshCw className="loading-spin" size={16} aria-hidden="true"/>测试中…</>:'测试访问'}</button><p className="help">从资产服务所在服务器测试两个接口；仅诊断，不保存连接，不更新资产。</p></div>{diagnosticRunning&&<p className="help" role="status">正在测试登录接口与资产接口…</p>}{diagnosticError&&<p className="error-text" role="alert">{diagnosticError}</p>}{diagnosticReport&&<VariationalDiagnostics report={diagnosticReport}/>}</section>}
+  <div className="form-actions">{connectTo&&ledger.connections[connectTo].configured&&<button type="button" className="button" disabled={busy} onClick={()=>void mutate('/api/connections','DELETE',{exchange:connectTo},closeConnection)}>断开并保留估值</button>}<button className="button primary" disabled={busy}>{busy&&!diagnosticRunning?'验证中…':'验证并连接'}</button></div>
   </form>
  </DialogContent></Dialog>
  <Dialog open={!!detail} onOpenChange={v=>!v&&setDetail(null)}><DialogContent className="detail-dialog"><DialogHeader><DialogTitle>{detail?.project} {detail?.mode==='binance'?'钱包资产明细':detail?.mode==='okx'?'账户资产估值明细':'账户明细'}</DialogTitle><DialogDescription>{detail?.mode==='variational'?'估值时间 ':'最近同步 '}{stamp(detail?.updatedAt??null)} · {detail?.mode==='binance'?'钱包资产估值 / USD':detail?.mode==='okx'?'账户资产估值 / USD':'美元净权益'}</DialogDescription></DialogHeader><div className="holdings"><Table><TableHeader><TableRow><TableHead>{detail?.mode==='binance'||detail?.mode==='okx'?'账户 / 估值单位':'账户 / 币种'}</TableHead><TableHead className="numeric">{detail?.mode==='binance'?'折合余额 / USDT':detail?.mode==='okx'?'折合金额 / USD':detail?.mode==='variational'?'净权益 / USDC':'数量'}</TableHead><TableHead className="numeric">美元价值</TableHead></TableRow></TableHeader><TableBody>{detail?.details?.map((b,i)=><TableRow key={i}><TableCell>{b.account}<small className="ticker">{b.coin}</small></TableCell><TableCell className="numeric">{money(b.quantity,6)}</TableCell><TableCell className="numeric">{money(b.value)}</TableCell></TableRow>)}</TableBody></Table></div><p className="help">{detail?.mode==='variational'?'按 Omni 返回的 USDC 净权益与 USDC/USD 报价换算美元估值。净权益已包含未实现盈亏，不再累加保证金、盈亏或持仓名义价值；资产来源未提供时刻；估值时间取账户获取时间与汇率时间中较早者。':detail?.mode==='okx'?'总额直接采用 OKX 返回的账户总资产美元估值；分项是各账户的折合金额，不代表实际 USD 持仓，分项与总额可能存在舍入差异。不额外累加保证金、未实现盈亏或持仓名义价值，不自动汇总子账户。':detail?.mode==='binance'?'按 Binance 返回的各钱包折合 USDT 余额汇总，再按 USDT/USD 汇率换算；折合余额不是实际 USDT 持仓。不额外累加现货、合约或持仓名义价值，未实现盈亏是否包含以接口返回为准。':'账户合计采用交易所净权益。币种行仅供核对，不将保证金和持仓名义价值再次计入。'}</p></DialogContent></Dialog>

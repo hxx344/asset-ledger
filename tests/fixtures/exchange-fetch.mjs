@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { verifyTypedData } from 'ethers';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 const flag = name => existsSync(join(process.env.ASSET_DATA_DIR, name));
@@ -10,8 +10,14 @@ const variationalFixture = () => flag('variational-fixture.json') ? JSON.parse(r
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input));
+  const diagnosticFixture = variationalFixture();
+  if (diagnosticFixture.diagnosticOnly) {
+    const allowed = ['https://omni.variational.io/api/me', 'https://omni.variational.io/api/portfolio?compute_margin=true'].includes(url.href);
+    appendFileSync(join(process.env.ASSET_DATA_DIR, 'variational-diagnostic-requests.jsonl'), JSON.stringify(allowed ? url.pathname + url.search : 'unexpected-endpoint') + '\n');
+    assert.ok(allowed, 'Diagnostics cannot contact pricing, trading or other endpoints');
+  }
   if (url.hostname === 'omni.variational.io') {
-    assert.equal(url.href, 'https://omni.variational.io/api/portfolio?compute_margin=true');
+    assert.ok(['https://omni.variational.io/api/me', 'https://omni.variational.io/api/portfolio?compute_margin=true'].includes(url.href));
     assert.equal(init.method, 'GET');
     assert.equal(init.redirect, 'manual');
     assert.equal(init.body, undefined);
@@ -25,7 +31,7 @@ globalThis.fetch = async (input, init = {}) => {
       referer: 'https://omni.variational.io/',
       'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36',
     });
-    const fixture = variationalFixture();
+    const fixture = url.pathname === '/api/me' ? diagnosticFixture.session ?? {} : diagnosticFixture;
     const status = fixture.status ?? (fixture.failure === true ? 503 : fixture.failure || 200);
     if (fixture.challenge || fixture.html) {
       return new Response(`<!doctype html><title>${fixture.challenge ? 'Just a moment' : 'Upstream page'}</title><p>${cookie}</p>`, {
@@ -34,6 +40,7 @@ globalThis.fetch = async (input, init = {}) => {
       });
     }
     if (fixture.failure || status >= 400) return Response.json({ error: cookie }, { status });
+    if (url.pathname === '/api/me') return Response.json(fixture.payload ?? { token: 'synthetic-var-returned-token', account: 'PRIVATE_DIAGNOSTIC_ACCOUNT' });
     return Response.json(fixture.portfolio ?? { balance: fixture.balance ?? '125', upnl: '9000', margin: '8000', sub_accounts: [{ balance: '7000' }] });
   }
   if (url.hostname === 'api.coinbase.com') {
