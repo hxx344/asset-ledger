@@ -1,8 +1,9 @@
-"""One read-only login probe using Var Grid's standard-library HTTP client.
+"""One fixed read-only request using Var Grid's standard-library HTTP client.
 
 The only credential input is stdin. Never print upstream bodies or exception text.
 """
 import json
+import math
 import re
 import socket
 import sys
@@ -10,7 +11,11 @@ import time
 import urllib.error
 import urllib.request
 
-URL = "https://omni.variational.io/api/me"
+TARGETS = {
+    "diagnose-session": ("session", "/api/me"),
+    "diagnose-portfolio": ("portfolio", "/api/portfolio?compute_margin=true"),
+    "sync-portfolio": ("portfolio", "/api/portfolio?compute_margin=true"),
+}
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36"
 MAX_BYTES = 2 * 1024 * 1024
 MAX_INPUT_BYTES = 8192
@@ -36,17 +41,32 @@ def valid_token(value):
     return isinstance(value, str) and 5 <= len(value) <= 4096 and re.fullmatch(r"[A-Za-z0-9._~-]+", value) is not None
 
 
-def probe(token, opener=None):
-    if not valid_token(token):
+def valid_balance(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return False
+    if isinstance(value, str) and (len(value) > 128 or re.fullmatch(r"-?[0-9]+(?:\.[0-9]+)?", value) is None):
+        return False
+    try:
+        number = float(value)
+        return math.isfinite(number) and not (isinstance(value, str) and number == 0 and re.search(r"[1-9]", value))
+    except (ValueError, OverflowError):
+        return False
+
+
+def probe(token, opener=None, operation="diagnose-session"):
+    if not valid_token(token) or not isinstance(operation, str) or operation not in TARGETS:
         raise ValueError("Invalid diagnostic input")
+    endpoint, path = TARGETS[operation]
     started = time.monotonic()
-    result = {"endpoint": "session", "path": "/api/me", "status": None,
+    result = {"endpoint": endpoint, "path": path, "status": None,
               "contentType": None, "challenge": False, "elapsedMs": 0,
               "structureOk": None, "outcome": "network_error"}
+    if operation == "sync-portfolio":
+        result["balance"] = None
     response = None
     try:
         # Match Grid's Client.request login path, including its three headers.
-        request = urllib.request.Request(URL, headers={
+        request = urllib.request.Request("https://omni.variational.io" + path, headers={
             "Cookie": "vr-token=" + token, "User-Agent": USER_AGENT, "Accept": "application/json",
         }, method="GET")
         client = opener if opener is not None else urllib.request.build_opener(NoRedirect())
@@ -78,9 +98,15 @@ def probe(token, opener=None):
             if len(body) > MAX_BYTES:
                 raise ValueError("Invalid diagnostic response")
             data = json.loads(body)
-            returned_token = data.get("token") if isinstance(data, dict) else None
-            # Attest only to structure, never to authentication or token validity.
-            result["structureOk"] = isinstance(returned_token, str) and 0 < len(returned_token) <= 32768
+            if endpoint == "session":
+                returned_token = data.get("token") if isinstance(data, dict) else None
+                # Attest only to structure, never to authentication or token validity.
+                result["structureOk"] = isinstance(returned_token, str) and 0 < len(returned_token) <= 32768
+            else:
+                balance = data.get("balance") if isinstance(data, dict) else None
+                result["structureOk"] = bool(valid_balance(balance))
+                if operation == "sync-portfolio" and result["structureOk"]:
+                    result["balance"] = balance
             result["outcome"] = "ok" if result["structureOk"] else "invalid_data"
     except (socket.timeout, TimeoutError):
         result["outcome"] = "timeout"
@@ -107,9 +133,11 @@ def main():
         if len(raw) > MAX_INPUT_BYTES:
             return 2
         value = json.loads(raw)
-        if not isinstance(value, dict) or set(value) != {"vrToken"} or not valid_token(value["vrToken"]):
+        if (not isinstance(value, dict) or set(value) != {"vrToken", "operation"}
+                or not valid_token(value["vrToken"]) or not isinstance(value["operation"], str)
+                or value["operation"] not in TARGETS):
             return 2
-        result = probe(value["vrToken"])
+        result = probe(value["vrToken"], operation=value["operation"])
         sys.stdout.write(json.dumps(result, separators=(",", ":"), allow_nan=False) + "\n")
         return 0
     except Exception:

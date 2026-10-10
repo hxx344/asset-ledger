@@ -1,44 +1,28 @@
 import type { Balance } from './types';
+import { readVariationalPythonBalance } from './variational-python-client.ts';
+import { validateVariationalCredential, variationalDecimal as decimal, VARIATIONAL_ERRORS } from './variational-shared.ts';
+import type { VariationalCredential } from './variational-shared.ts';
 
-export type VariationalCredential = { vrToken: string };
+export type { VariationalCredential } from './variational-shared.ts';
+export { hasValidVariationalBalance } from './variational-shared.ts';
 type Json = Record<string, unknown>;
-const PORTFOLIO = 'https://omni.variational.io/api/portfolio?compute_margin=true';
-// Match Var Grid's default session client; this does not complete browser challenges.
+// Retain the original Node request headers for diagnostic comparisons only.
 const GRID_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36';
 const COINGECKO = 'https://api.coingecko.com/api/v3/simple/price?ids=usd-coin&vs_currencies=usd&include_last_updated_at=true';
 const COINBASE = 'https://api.coinbase.com/v2/exchange-rates?currency=USDC';
-const INVALID = 'Var 返回的账户数据不完整或数值无效；已保留上次数据';
-const FAILED = 'Var 读取失败，请检查会话及网络后重试；已保留上次数据';
-const CHALLENGE = 'Var 的 Cloudflare 浏览器验证拦截了服务器请求，后台暂时无法读取资产；这不能说明令牌失效。已保留上次数据';
-const UNAUTHORIZED = 'Var 未接受当前会话（HTTP 401），请确认 Omni 登录状态并更新 vr-token；已保留上次数据';
-const FORBIDDEN = 'Var 拒绝服务器访问（HTTP 403），尚未确认是会话失效；已保留上次数据';
-const HTML_RESPONSE = 'Var 返回了网页而非账户数据，无法确认登录或访问状态；已保留上次数据';
-const RATE_LIMITED = 'Var 请求过于频繁，请稍后重试；已保留上次数据';
-const TIMED_OUT = 'Var 读取超时，请稍后重试；已保留上次数据';
-const SAFE_ERRORS = new Set([INVALID, FAILED, CHALLENGE, UNAUTHORIZED, FORBIDDEN, HTML_RESPONSE, RATE_LIMITED, TIMED_OUT]);
+const INVALID = VARIATIONAL_ERRORS.invalid_data;
+const FAILED = VARIATIONAL_ERRORS.network_error;
+const RATE_LIMITED = VARIATIONAL_ERRORS.rate_limited;
+const TIMED_OUT = VARIATIONAL_ERRORS.timeout;
+const SAFE_ERRORS = new Set<string>(Object.values(VARIATIONAL_ERRORS));
 const MAX_BYTES = 2 * 1024 * 1024;
 
 function object(value: unknown): value is Json {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function decimal(value: unknown): number {
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) throw new Error(INVALID);
-    return value === 0 ? 0 : value;
-  }
-  if (typeof value !== 'string' || value.length > 128 || !/^-?\d+(?:\.\d+)?$/.test(value)) throw new Error(INVALID);
-  const result = Number(value);
-  if (!Number.isFinite(result) || (result === 0 && /[1-9]/.test(value))) throw new Error(INVALID);
-  return result === 0 ? 0 : result;
-}
-
-export function hasValidVariationalBalance(value: unknown): boolean {
-  try { decimal(value); return true; } catch { return false; }
-}
-
 export function variationalRequestHeaders(c: VariationalCredential): Record<string, string> {
-  if (typeof c?.vrToken !== 'string' || c.vrToken.length < 5 || c.vrToken.length > 4096 || !/^[A-Za-z0-9._~-]+$/.test(c.vrToken)) throw new Error('Var 请填写单个 vr-token 值，不要填写完整 Cookie');
+  validateVariationalCredential(c);
   return {
     Accept: 'application/json',
     'User-Agent': GRID_USER_AGENT,
@@ -48,7 +32,7 @@ export function variationalRequestHeaders(c: VariationalCredential): Record<stri
   };
 }
 
-// Only these fixed GET URLs are reachable; credentials are never sent to pricing providers.
+// Pricing remains in Node; these requests never receive session credentials.
 async function read(url: string, headers: Record<string, string>, fetcher: typeof fetch): Promise<Json> {
   try {
     const response = await fetcher(url, { method: 'GET', headers, redirect: 'manual', cache: 'no-store', signal: AbortSignal.timeout(12000) });
@@ -58,17 +42,11 @@ async function read(url: string, headers: Record<string, string>, fetcher: typeo
       throw new Error(message);
     };
     if (response.redirected) return rejectResponse(FAILED);
-    // Omni's own client uses this header to identify a browser challenge. It takes precedence
-    // over HTTP authentication codes; HTML or a generic 403 alone cannot establish its cause.
-    if (url === PORTFOLIO && response.headers.get('cf-mitigated')?.trim().toLowerCase() === 'challenge') return rejectResponse(CHALLENGE);
     if (!response.ok) {
-      if (url === PORTFOLIO && response.status === 401) return rejectResponse(UNAUTHORIZED);
-      if (url === PORTFOLIO && response.status === 403) return rejectResponse(FORBIDDEN);
       if (response.status === 429) return rejectResponse(RATE_LIMITED);
       return rejectResponse(FAILED);
     }
     const contentType = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
-    if (url === PORTFOLIO && ['text/html', 'application/xhtml+xml'].includes(contentType ?? '')) return rejectResponse(HTML_RESPONSE);
     if (contentType && contentType !== 'application/json' && !/^application\/[a-z0-9.+-]+\+json$/.test(contentType)) return rejectResponse(INVALID);
     if (Number(response.headers.get('content-length') || 0) > MAX_BYTES || !response.body) return rejectResponse(INVALID);
     const reader = response.body.getReader();
@@ -113,11 +91,17 @@ async function usdcQuote(fetcher: typeof fetch): Promise<{ price: number; at: nu
   }
 }
 
-export async function syncVariational(c: VariationalCredential, fetcher: typeof fetch = fetch): Promise<{ total: number; details: Balance[]; updatedAt: string }> {
+export async function syncVariational(c: VariationalCredential, fetcher: typeof fetch = fetch, portfolioReader: (c: VariationalCredential) => Promise<number | string> = readVariationalPythonBalance): Promise<{ total: number; details: Balance[]; updatedAt: string }> {
   // vr-token is a full web session, not a read-only API key. The application only reads this portfolio.
-  const portfolio = await read(PORTFOLIO, variationalRequestHeaders(c), fetcher);
+  validateVariationalCredential(c);
+  let balance: number | string;
+  try { balance = await portfolioReader(c); }
+  catch (error) {
+    if (error instanceof Error && SAFE_ERRORS.has(error.message)) throw error;
+    throw new Error(FAILED);
+  }
   const fetchedAt = Date.now();
-  const quantity = decimal(portfolio.balance);
+  const quantity = decimal(balance);
   // Omni's portfolio header uses balance directly, including all sub-accounts and unrealized P&L.
   // Neither upnl, margin usage, sub-account balances nor position notional is added again.
   const quote = await usdcQuote(fetcher);

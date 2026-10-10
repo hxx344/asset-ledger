@@ -21,9 +21,9 @@ const outcomeLabels: Record<VariationalDiagnosticOutcome, string> = {
 
 const contentTypeLabels = { json: 'JSON', html: 'HTML', other: '其他', missing: '未提供 Content-Type' };
 const endpointNames = { session: '登录接口', portfolio: '资产接口' };
-const clientNames = { 'asset-node': 'Asset · Node.js', 'grid-python': 'Var Grid · Python 登录客户端' };
+const clientNames = { 'asset-node': 'Asset · Node.js', 'grid-python': 'Var Grid · Python 请求方式' };
 const clientErrors = {
-  client_unavailable: '服务器未找到可用的 Python 3，未执行这组登录测试；这不表示上游网络请求失败。',
+  client_unavailable: '服务器未找到可用的 Python 3，未执行此接口测试；这不表示上游网络请求失败。',
   client_error: '服务器上的 Python 诊断客户端未能完成运行，无法判断这组接口结果；这不同于上游网络请求失败。',
 };
 
@@ -86,7 +86,7 @@ export function VariationalDiagnostics({ report }: { report: VariationalDiagnost
         </article>)}
       </div>
     </section>)}
-    <p className="help">对比两套请求方式，仅反映本次响应。Var Grid 只测试登录接口；登录响应符合预期，不代表资产接口或 Grid 行情、报价可用。</p>
+    <p className="help">Python 组沿用 Var Grid 的登录请求方式测试登录与资产接口，正式资产同步也使用这套 Python 请求方式。登录响应符合预期不代表资产接口可用；测试未覆盖 Grid 行情或报价。</p>
     <div className="diagnostic-copy"><button type="button" className="button" onClick={() => void copy()}>复制诊断结果</button>{copyState === 'copied' && <span className="help good-text" role="status">已复制</span>}</div>
     {copyState === 'fallback' && <label className="diagnostic-fallback">诊断结果文本<span className="help" role="status">浏览器无法自动复制，请选中下方文本后复制。</span><textarea readOnly rows={10} value={text} onFocus={event => event.currentTarget.select()} spellCheck={false}/></label>}
   </div>;

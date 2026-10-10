@@ -69,18 +69,26 @@ async function scenario(runtime, sourceAlias, full) {
   };
   const encrypted = () => database(db => db.prepare("SELECT encrypted FROM connections WHERE owner='owner' AND exchange='variational'").get()?.encrypted);
   const diagnosticRequests = () => {
-    const file = join(directory, 'variational-diagnostic-requests.jsonl');
+    return ['diagnostic', 'diagnose-session', 'diagnose-portfolio'].flatMap(name => {
+      const file = join(directory, `variational-${name}-requests.jsonl`);
+      return existsSync(file) ? readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : [];
+    });
+  };
+  const syncRequests = () => {
+    const file = join(directory, 'variational-sync-requests.jsonl');
     return existsSync(file) ? readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : [];
   };
-  const assertReport = (report, portfolioOutcome, pythonOutcome = 'ok') => {
+  const pythonPortfolioRequest = { client: 'grid-python', path: '/api/portfolio?compute_margin=true', operation: 'sync-portfolio' };
+  const assertPythonPortfolioRequest = before => assert.deepEqual(syncRequests().slice(before), [pythonPortfolioRequest], 'Each connection or refresh makes exactly one Python portfolio request, without a login probe or Node fallback');
+  const assertReport = (report, { nodeSession = 'ok', nodePortfolio = 'ok', pythonSession = 'ok', pythonPortfolio = 'ok' } = {}) => {
     assert.deepEqual(Object.keys(report).sort(), ['checkedAt', 'clients']);
     assert.ok(Number.isFinite(Date.parse(report.checkedAt)));
     assert.deepEqual(report.clients.map(client => client.client), ['asset-node', 'grid-python']);
     assert.deepEqual(report.clients[0].results.map(result => [result.endpoint, result.path, result.outcome]), [
-      ['session', '/api/me', 'ok'], ['portfolio', '/api/portfolio?compute_margin=true', portfolioOutcome],
+      ['session', '/api/me', nodeSession], ['portfolio', '/api/portfolio?compute_margin=true', nodePortfolio],
     ]);
     assert.deepEqual(report.clients[1].results.map(result => [result.endpoint, result.path, result.outcome]), [
-      ['session', '/api/me', pythonOutcome],
+      ['session', '/api/me', pythonSession], ['portfolio', '/api/portfolio?compute_margin=true', pythonPortfolio],
     ]);
     for (const client of report.clients) {
       assert.deepEqual(Object.keys(client).sort(), ['checkedAt', 'client', 'results']);
@@ -92,7 +100,7 @@ async function scenario(runtime, sourceAlias, full) {
     }
     assertNoSecrets(JSON.stringify(report));
   };
-  const expectedDiagnosticRequests = ['asset-node /api/me', 'asset-node /api/portfolio?compute_margin=true', 'grid-python /api/me'];
+  const expectedDiagnosticRequests = ['asset-node /api/me', 'asset-node /api/portfolio?compute_margin=true', 'grid-python /api/me', 'grid-python /api/portfolio?compute_margin=true'];
   const requestLabels = requests => requests.map(({ client, path }) => `${client} ${path}`).sort();
   async function start() {
     const reservation = createServer();
@@ -135,10 +143,18 @@ async function scenario(runtime, sourceAlias, full) {
     return JSON.parse(text);
   }
   const ledger = () => json('/api/ledger');
-  const connect = (value = credentials, status = 200) => json('/api/connections', 'POST', value, status);
+  async function connect(value = credentials, status = 200) {
+    const before = syncRequests().length;
+    const result = await json('/api/connections', 'POST', value, status);
+    if (status === 200) assertPythonPortfolioRequest(before);
+    return result;
+  }
   async function forceSync() {
+    const before = syncRequests().length;
     database(db => db.prepare("UPDATE settings SET value='0' WHERE owner='owner' AND key='last-attempt'").run());
-    return json('/api/sync', 'POST', {});
+    const result = await json('/api/sync', 'POST', {});
+    assertPythonPortfolioRequest(before);
+    return result;
   }
   async function restart() { await stop(); configure(directory); await start(); }
 
@@ -157,7 +173,7 @@ async function scenario(runtime, sourceAlias, full) {
 
     if (full) {
       const diagnosticPath = '/api/connections/variational-test';
-      fixture({ diagnosticOnly: true, challenge: true, status: 403 });
+      fixture({ diagnosticOnly: true, challenge: true, status: 403, session: { challenge: true, status: 403 }, pythonSession: {}, pythonPortfolio: { balance: '982174.625' } });
       await json(diagnosticPath, 'POST', { vrToken: credentials.vrToken }, 403, { origin: 'https://untrusted.example' });
       await json(diagnosticPath, 'POST', { vrToken: credentials.vrToken }, 400, { 'Content-Type': 'text/plain' });
       for (const body of [
@@ -166,11 +182,14 @@ async function scenario(runtime, sourceAlias, full) {
       ]) await json(diagnosticPath, 'POST', body, 400);
       assert.deepEqual(diagnosticRequests(), [], 'Rejected diagnostics cannot make any upstream request');
       const diagnostic = await json(diagnosticPath, 'POST', { vrToken: credentials.vrToken });
-      assertReport(diagnostic, 'challenge');
-      assert.equal(diagnostic.clients[0].results[0].structureOk, true);
+      assertReport(diagnostic, { nodeSession: 'challenge', nodePortfolio: 'challenge' });
+      assert.equal(diagnostic.clients[0].results[0].structureOk, null);
       assert.equal(diagnostic.clients[0].results[1].status, 403);
       assert.equal(diagnostic.clients[0].results[1].challenge, true);
       assert.equal(diagnostic.clients[0].results[1].structureOk, null);
+      assert.equal(diagnostic.clients[1].results[1].status, 200);
+      assert.equal(diagnostic.clients[1].results[1].structureOk, true);
+      assert.equal(JSON.stringify(diagnostic).includes('982174.625'), false, 'Python portfolio diagnostics cannot return balance values');
       assert.deepEqual(requestLabels(diagnosticRequests()), expectedDiagnosticRequests);
       const afterDiagnostic = await ledger();
       assert.deepEqual(afterDiagnostic.assets, initial.assets, 'Diagnostics cannot create or modify ledger assets');
@@ -178,7 +197,8 @@ async function scenario(runtime, sourceAlias, full) {
       assert.equal(encrypted(), undefined, 'A diagnostic cannot save the supplied session');
       const limited = await json(diagnosticPath, 'POST', { vrToken: credentials.vrToken }, 429);
       assert.deepEqual(Object.keys(limited), ['error']);
-      assert.equal(diagnosticRequests().length, 3, 'Cooldown cannot make extra upstream requests');
+      assert.equal(diagnosticRequests().length, 4, 'Cooldown cannot make extra upstream requests');
+      assert.deepEqual(syncRequests(), [], 'Diagnostics cannot start formal asset synchronization');
 
       for (const invalid of [
         { ...credentials, vrToken: '' }, { ...credentials, vrToken: 'vr-token=' + credentials.vrToken },
@@ -197,7 +217,7 @@ async function scenario(runtime, sourceAlias, full) {
         assert.equal(encrypted(), undefined, 'Failed first verification cannot save a credential');
       }
 
-      fixture({ balance: '0', quote: 0.98 });
+      fixture({ challenge: true, status: 403, pythonPortfolio: { balance: '0' }, quote: 0.98 });
       const zero = await connect();
       assert.equal(zero.assets.length, initialCount + 1);
       assert.equal(rowOf(zero).value, 0);
@@ -224,9 +244,9 @@ async function scenario(runtime, sourceAlias, full) {
       await restart();
       fixture({ diagnosticOnly: true, balance: '982174.625', pythonSession: { challenge: true, status: 403 } });
       const healthyDiagnostic = await json(diagnosticPath, 'POST', { vrToken: replacement.vrToken });
-      assertReport(healthyDiagnostic, 'ok', 'challenge');
+      assertReport(healthyDiagnostic, { pythonSession: 'challenge' });
       assert.equal(JSON.stringify(healthyDiagnostic).includes('982174.625'), false, 'Diagnostics cannot return account values');
-      assert.deepEqual(requestLabels(diagnosticRequests().slice(3)), expectedDiagnosticRequests);
+      assert.deepEqual(requestLabels(diagnosticRequests()), expectedDiagnosticRequests.flatMap(value => [value, value]).sort());
       const unchanged = await ledger();
       assert.deepEqual(rowOf(unchanged), rowOf(negative), 'Diagnostic success cannot modify amounts, details or updatedAt');
       assert.deepEqual(unchanged.connections.variational, negative.connections.variational);
@@ -257,7 +277,7 @@ async function scenario(runtime, sourceAlias, full) {
         }
         assert.equal(encrypted(), savedCipher);
       }
-      fixture({ balance: '200', geckoFailure: true, coinbaseRate: '0.5' });
+      fixture({ challenge: true, status: 403, pythonPortfolio: { balance: '200' }, geckoFailure: true, coinbaseRate: '0.5' });
       const fallback = await forceSync();
       assert.equal(rowOf(fallback).value, 100, 'Coinbase USDC/USD is used when CoinGecko fails');
       assert.equal(fallback.connections.variational.error, null);
@@ -349,6 +369,8 @@ async function scenario(runtime, sourceAlias, full) {
     assertPreserved(rowOf(afterImportRestart), rowOf(imported.ledger));
     assert.deepEqual(afterImportRestart.connections.variational, imported.ledger.connections.variational);
     assert.equal(encrypted(), beforeImportCipher);
+    assert.ok(syncRequests().length > 0, 'Production connection and refresh paths exercise the real Python helper');
+    for (const request of syncRequests()) assert.deepEqual(request, pythonPortfolioRequest, 'No formal Node Omni request, login probe or extra endpoint is allowed');
     assertNoSecrets(output);
   } finally {
     await stop();
@@ -364,5 +386,5 @@ export async function runVariationalSmoke(runtime) {
   execFileSync(process.platform === 'win32' ? 'python' : 'python3', ['-I', '-B', '-c', 'import ssl; assert ssl.OPENSSL_VERSION'], { windowsHide: true, stdio: 'pipe' });
   await scenario(runtime, 'var', true);
   await scenario(runtime, 'variational', false);
-  console.log('Variational production smoke passed: authentication/origin checks, transient Node/Python three-GET diagnostics and cooldown, encrypted session isolation, challenge/401/403/HTML diagnostics, failed verification, zero/negative equity, valuation and quote fallback, failure preservation, aliases/duplicate rejection, source import retention, trading export exclusion, disconnect and restart recovery.');
+  console.log('Variational production smoke passed: Python-only one-GET connections and refreshes, Node-challenge/Python-success isolation, authentication/origin checks, transient four-GET diagnostics without balances and cooldown, encrypted session isolation, challenge/401/403/HTML diagnostics, failed verification, zero/negative equity, valuation and quote fallback, failure preservation, aliases/duplicate rejection, source import retention, trading export exclusion, disconnect and restart recovery.');
 }

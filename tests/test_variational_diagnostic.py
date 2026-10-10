@@ -24,6 +24,9 @@ TOKEN = "synthetic.python.input"
 RETURNED = "synthetic.python.returned"
 PRIVATE = "PRIVATE_RESPONSE " + TOKEN
 RESULT_KEYS = {"endpoint", "path", "status", "contentType", "challenge", "elapsedMs", "structureOk", "outcome"}
+SESSION_URL = "https://omni.variational.io/api/me"
+PORTFOLIO_PATH = "/api/portfolio?compute_margin=true"
+OPERATIONS = ("diagnose-session", "diagnose-portfolio", "sync-portfolio")
 
 
 def headers(values=None):
@@ -66,9 +69,12 @@ class Opener:
 
 
 class HelperTests(unittest.TestCase):
-    def safe(self, result, outcome):
-        self.assertEqual(set(result), RESULT_KEYS)
-        self.assertEqual((result["endpoint"], result["path"]), ("session", "/api/me"))
+    def safe(self, result, outcome, operation="diagnose-session"):
+        self.assertEqual(set(result), RESULT_KEYS | ({"balance"} if operation == "sync-portfolio" else set()))
+        self.assertEqual((result["endpoint"], result["path"]),
+                         ("session", "/api/me") if operation == "diagnose-session" else ("portfolio", PORTFOLIO_PATH))
+        if operation == "sync-portfolio" and outcome != "ok":
+            self.assertIsNone(result["balance"])
         self.assertEqual(result["outcome"], outcome)
         self.assertIs(type(result["elapsedMs"]), int)
         self.assertGreaterEqual(result["elapsedMs"], 0)
@@ -87,18 +93,21 @@ class HelperTests(unittest.TestCase):
         return code, output.getvalue()
 
     def test_fixed_destination_headers_timeout_and_no_body(self):
-        response = Response()
-        opener = Opener(response)
-        self.safe(helper.probe(TOKEN, opener), "ok")
-        self.assertTrue(response.was_closed)
-        self.assertEqual(response.read_sizes, [2 * 1024 * 1024 + 1])
-        request, timeout = opener.calls[0]
-        self.assertEqual((request.full_url, request.get_method(), request.data, timeout),
-                         ("https://omni.variational.io/api/me", "GET", None, 20))
-        self.assertEqual({key.lower(): value for key, value in request.header_items()}, {
-            "cookie": "vr-token=" + TOKEN, "accept": "application/json",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36",
-        })
+        for operation in OPERATIONS:
+            response = Response(json.dumps({"token": RETURNED, "balance": "125.5", "account": PRIVATE}).encode())
+            opener = Opener(response)
+            result = self.safe(helper.probe(TOKEN, opener, operation), "ok", operation)
+            self.assertEqual(result.get("balance"), "125.5" if operation == "sync-portfolio" else None)
+            self.assertTrue(response.was_closed)
+            self.assertEqual(response.read_sizes, [2 * 1024 * 1024 + 1])
+            self.assertEqual(len(opener.calls), 1)
+            request, timeout = opener.calls[0]
+            url = SESSION_URL if operation == "diagnose-session" else "https://omni.variational.io" + PORTFOLIO_PATH
+            self.assertEqual((request.full_url, request.get_method(), request.data, timeout), (url, "GET", None, 20))
+            self.assertEqual({key.lower(): value for key, value in request.header_items()}, {
+                "cookie": "vr-token=" + TOKEN, "accept": "application/json",
+                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36",
+            })
 
     def test_default_opener_installs_no_redirect_handler(self):
         opener = Opener(Response())
@@ -113,7 +122,7 @@ class HelperTests(unittest.TestCase):
             with self.subTest(status=status):
                 response = Response(status=status, fields={"Content-Type": "text/html", "cf-mitigated": " Challenge ",
                                     "Set-Cookie": "vr-token=" + RETURNED, "X-Private": "PRIVATE_HEADER"}, reject_read=True)
-                error = urllib.error.HTTPError(helper.URL, status, PRIVATE, response.headers, response) if status >= 300 else None
+                error = urllib.error.HTTPError(SESSION_URL, status, PRIVATE, response.headers, response) if status >= 300 else None
                 result = self.safe(helper.probe(TOKEN, Opener(response, error)), "challenge")
                 self.assertEqual((result["status"], result["contentType"], result["challenge"], result["structureOk"]),
                                  (status, "html", True, None))
@@ -129,7 +138,7 @@ class HelperTests(unittest.TestCase):
         ):
             with self.subTest(status=status, mime=mime):
                 response = Response(status=status, fields={"Content-Type": mime, "Server": "cloudflare"}, reject_read=True)
-                error = urllib.error.HTTPError(helper.URL, status, PRIVATE, response.headers, response) if status >= 300 else None
+                error = urllib.error.HTTPError(SESSION_URL, status, PRIVATE, response.headers, response) if status >= 300 else None
                 result = self.safe(helper.probe(TOKEN, Opener(response, error)), outcome)
                 self.assertFalse(result["challenge"])
                 self.assertEqual(response.read_sizes, [])
@@ -174,17 +183,79 @@ class HelperTests(unittest.TestCase):
     def test_stdin_is_strict_bounded_and_does_not_print_invalid_input(self):
         for raw in (b"", b"{", b"null", b"[]", b'{"vrToken":123}', b'{"vrToken":"abc"}',
                     json.dumps({"vrToken": TOKEN, "url": "https://untrusted.example"}).encode(),
+                    json.dumps({"vrToken": TOKEN}).encode(),
+                    *(json.dumps({"vrToken": TOKEN, "operation": operation}).encode() for operation in (None, {}, [], "GET", "sync", "https://untrusted.example")),
+                    json.dumps({"vrToken": TOKEN, "operation": "sync-portfolio", "balance": "125"}).encode(),
                     json.dumps({"vrToken": TOKEN}).encode() + b"{}", b"x" * 8193):
             opener = Opener(Response())
             code, output = self.main_result(raw, opener)
             self.assertNotEqual(code, 0); self.assertEqual(output, "")
             self.assertEqual(opener.calls, [])
-        for raw in (json.dumps({"vrToken": TOKEN}).encode(),
-                    json.dumps({"vrToken": "a" * 4096}).encode().ljust(8192, b" ")):
+        for raw in (json.dumps({"vrToken": TOKEN, "operation": "diagnose-session"}).encode(),
+                    json.dumps({"vrToken": "a" * 4096, "operation": "diagnose-session"}).encode().ljust(8192, b" ")):
             opener = Opener(Response())
             code, output = self.main_result(raw, opener)
             self.assertEqual(code, 0); self.assertEqual(len(output.splitlines()), 1)
             self.safe(json.loads(output), "ok"); self.assertEqual(len(opener.calls), 1)
+
+    def test_portfolio_amounts_allow_zero_and_negative_equity_without_exposing_other_fields(self):
+        for operation in ("diagnose-portfolio", "sync-portfolio"):
+            for balance in ("0", "-0.000", "-125.50", "0.000000000001", 0, -12.5, 1e-300, 1e300):
+                body = json.dumps({"balance": balance, "token": RETURNED, "upnl": "9999", "account": PRIVATE,
+                                   "sub_accounts": {"cross": {"balance": "8888"}}}).encode()
+                result = self.safe(helper.probe(TOKEN, Opener(Response(body)), operation), "ok", operation)
+                self.assertTrue(result["structureOk"])
+                if operation == "sync-portfolio":
+                    self.assertEqual(result["balance"], balance)
+                else:
+                    self.assertNotIn("balance", result)
+
+    def test_portfolio_rejects_invalid_amounts_instead_of_substituting_zero(self):
+        values = (None, True, False, "", " ", "NaN", "Infinity", "1e9", "1junk", "+1", ".5", "１２３", "١٢٣",
+                  "9" * 309, "0." + "0" * 400 + "1", "1" * 129, [], {}, float("nan"), float("inf"), 10 ** 400)
+        for operation in ("diagnose-portfolio", "sync-portfolio"):
+            for value in values:
+                with self.subTest(operation=operation, value=str(value)[:30]):
+                    response = Response(json.dumps({"balance": value, "token": RETURNED}).encode())
+                    result = self.safe(helper.probe(TOKEN, Opener(response), operation), "invalid_data", operation)
+                    self.assertFalse(result["structureOk"])
+            for value in (None, [], {}, {"data": {"balance": "125"}}, {"token": RETURNED}, {"upnl": "5"}):
+                self.safe(helper.probe(TOKEN, Opener(Response(json.dumps(value).encode())), operation), "invalid_data", operation)
+
+    def test_portfolio_failure_outputs_never_contain_a_balance_or_raw_response(self):
+        for operation in ("diagnose-portfolio", "sync-portfolio"):
+            for status, fields, outcome in (
+                (200, {"Content-Type": "text/html", "cf-mitigated": "challenge"}, "challenge"),
+                (403, {"Content-Type": "text/html", "cf-mitigated": "challenge"}, "challenge"),
+                (401, {"Content-Type": "application/json"}, "unauthorized"),
+                (403, {"Content-Type": "text/html"}, "forbidden"),
+                (429, {"Content-Type": "application/json"}, "rate_limited"),
+                (302, {"Content-Type": "text/html"}, "redirect"),
+                (200, {"Content-Type": "text/html"}, "html"),
+            ):
+                response = Response(status=status, fields=fields, reject_read=True)
+                error = urllib.error.HTTPError("https://omni.variational.io" + PORTFOLIO_PATH, status, PRIVATE, response.headers, response) if status >= 300 else None
+                self.safe(helper.probe(TOKEN, Opener(response, error), operation), outcome, operation)
+                self.assertEqual(response.read_sizes, [])
+                self.assertTrue(response.was_closed)
+            for response in (Response(PRIVATE.encode()), Response(b" " * (2 * 1024 * 1024 + 1))):
+                self.safe(helper.probe(TOKEN, Opener(response), operation), "invalid_data", operation)
+            for error, outcome in ((socket.timeout(PRIVATE), "timeout"), (urllib.error.URLError(PRIVATE), "network_error")):
+                self.safe(helper.probe(TOKEN, Opener(error=error), operation), outcome, operation)
+
+    def test_main_has_separate_diagnostic_and_sync_output_permissions(self):
+        for operation in OPERATIONS:
+            opener = Opener(Response(json.dumps({"token": RETURNED, "balance": "321.125", "account": PRIVATE}).encode()))
+            code, output = self.main_result(json.dumps({"vrToken": TOKEN, "operation": operation}).encode(), opener)
+            self.assertEqual(code, 0)
+            result = self.safe(json.loads(output), "ok", operation)
+            self.assertEqual(len(opener.calls), 1)
+            self.assertEqual("balance" in result, operation == "sync-portfolio")
+        opener = Opener(Response())
+        for operation in ("unexpected", None, {}, []):
+            with self.assertRaises(ValueError):
+                helper.probe(TOKEN, opener, operation)
+        self.assertEqual(opener.calls, [])
 
     def test_real_urllib_handles_http_errors_and_redirects_without_following_them(self):
         state = {"status": 200, "paths": []}
@@ -195,7 +266,7 @@ class HelperTests(unittest.TestCase):
                 self.send_response(state["status"])
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Location", "https://untrusted.example/never")
-                body = json.dumps({"token": RETURNED}).encode()
+                body = json.dumps({"token": RETURNED, "balance": "125"}).encode()
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -209,17 +280,18 @@ class HelperTests(unittest.TestCase):
 
         class LoopbackHTTPS(urllib.request.HTTPSHandler):
             def https_open(self, request):
-                if request.full_url != helper.URL:
+                if request.full_url not in (SESSION_URL, "https://omni.variational.io" + PORTFOLIO_PATH):
                     raise AssertionError("Redirect must not be followed")
                 return self.do_open(lambda _host, **kwargs: http.client.HTTPConnection(
                     "127.0.0.1", server.server_port, **kwargs), request)
 
         try:
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), helper.NoRedirect(), LoopbackHTTPS())
-            for status, outcome in ((200, "ok"), (401, "unauthorized"), (403, "forbidden"), (302, "redirect"), (307, "redirect")):
-                state["status"] = status
-                self.safe(helper.probe(TOKEN, opener), outcome)
-            self.assertEqual(state["paths"], ["/api/me"] * 5)
+            for operation in OPERATIONS:
+                for status, outcome in ((200, "ok"), (401, "unauthorized"), (403, "forbidden"), (302, "redirect"), (307, "redirect")):
+                    state["status"] = status
+                    self.safe(helper.probe(TOKEN, opener, operation), outcome, operation)
+            self.assertEqual(state["paths"], ["/api/me"] * 5 + [PORTFOLIO_PATH] * 10)
             self.assertTrue(ssl.OPENSSL_VERSION)
         finally:
             server.shutdown(); server.server_close(); thread.join(timeout=2)

@@ -27,6 +27,17 @@ def main():
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
 
+    raw = sys.stdin.buffer.read(8193)
+    assert len(raw) <= 8192
+    supplied = json.loads(raw)
+    assert isinstance(supplied, dict) and set(supplied) == {"vrToken", "operation"}
+    operation = supplied["operation"]
+    assert operation in ("diagnose-session", "diagnose-portfolio", "sync-portfolio")
+    sys.stdin = io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8")
+    session = operation == "diagnose-session"
+    path = "/api/me" if session else "/api/portfolio?compute_margin=true"
+    requests = 0
+
     class Response(io.BytesIO):
         def __init__(self, status, headers, body):
             super().__init__(body)
@@ -37,7 +48,10 @@ def main():
 
     class Opener:
         def open(self, request, timeout):
-            assert request.full_url == "https://omni.variational.io/api/me"
+            nonlocal requests
+            requests += 1
+            assert requests == 1, "Each Python operation makes exactly one fixed GET"
+            assert request.full_url == "https://omni.variational.io" + path
             assert request.get_method() == "GET" and request.data is None and timeout == 20
             headers = {key.lower(): value for key, value in request.header_items()}
             cookie = headers.get("cookie")
@@ -48,10 +62,16 @@ def main():
                 "accept": "application/json",
             }
             fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
-            assert fixture.get("diagnosticOnly") is True
-            with fixture_path.with_name("variational-diagnostic-requests.jsonl").open("a", encoding="utf-8") as log:
-                log.write(json.dumps({"client": "grid-python", "path": "/api/me"}) + "\n")
-            value = fixture.get("pythonSession", fixture.get("session", {}))
+            diagnostic = operation.startswith("diagnose-")
+            assert diagnostic == (fixture.get("diagnosticOnly") is True)
+            # Separate writers: Windows append streams do not serialize independent processes.
+            filename = "variational-" + operation + "-requests.jsonl" if diagnostic else "variational-sync-requests.jsonl"
+            record = {"client": "grid-python", "path": path}
+            if not diagnostic:
+                record["operation"] = operation
+            with fixture_path.with_name(filename).open("a", encoding="utf-8") as log:
+                log.write(json.dumps(record) + "\n")
+            value = fixture.get("pythonSession", fixture.get("session", {})) if session else fixture.get("pythonPortfolio", fixture)
             status = value.get("status", 503 if value.get("failure") is True else value.get("failure") or 200)
             response_headers = Message()
             response_headers["Set-Cookie"] = "vr-token=synthetic-var-returned-token"
@@ -62,7 +82,12 @@ def main():
                 body = b"<p>PRIVATE_DIAGNOSTIC_ACCOUNT</p>"
             else:
                 response_headers["Content-Type"] = "application/json"
-                body = json.dumps(value.get("payload", {"token": "synthetic-var-returned-token", "account": "PRIVATE_DIAGNOSTIC_ACCOUNT"})).encode()
+                if session:
+                    payload = value.get("payload", {"token": "synthetic-var-returned-token", "account": "PRIVATE_DIAGNOSTIC_ACCOUNT"})
+                else:
+                    payload = value.get("portfolio", {"balance": value.get("balance", "125"), "upnl": "9000", "margin": "8000",
+                        "sub_accounts": [{"balance": "7000"}], "token": "synthetic-var-returned-token", "account": "PRIVATE_DIAGNOSTIC_ACCOUNT"})
+                body = json.dumps(payload).encode()
             response = Response(status, response_headers, body)
             if status >= 400 or 300 <= status < 400:
                 raise urllib.error.HTTPError(request.full_url, status, "synthetic", response_headers, response)

@@ -5,6 +5,7 @@ import { PassThrough } from 'node:stream';
 import type { spawn, SpawnOptions } from 'node:child_process';
 import { isAbsolute, basename } from 'node:path';
 import { diagnoseVariationalPython } from '../lib/variational-python-diagnostics.ts';
+import { readVariationalPythonBalance, runVariationalPython } from '../lib/variational-python-client.ts';
 
 const credential = { vrToken: 'synthetic.python.input' };
 const privateText = 'PRIVATE_HELPER_TEXT ' + credential.vrToken;
@@ -12,7 +13,9 @@ const success = {
   endpoint: 'session', path: '/api/me', status: 200, contentType: 'json',
   challenge: false, elapsedMs: 12, structureOk: true, outcome: 'ok',
 };
-type Report = Awaited<ReturnType<typeof diagnoseVariationalPython>>;
+const portfolioSuccess = { ...success, endpoint: 'portfolio', path: '/api/portfolio?compute_margin=true' };
+type Run = Awaited<ReturnType<typeof runVariationalPython>>;
+const single = (c: typeof credential, signal?: AbortSignal, launch?: typeof spawn) => runVariationalPython(c, 'diagnose-session', signal, launch);
 
 class FakeChild extends EventEmitter {
   stdin = new PassThrough();
@@ -51,14 +54,12 @@ function childFixture(action?: (child: FakeChild) => void) {
   return { child, launch, calls };
 }
 
-function safe(report: Report, outcome: string) {
-  assert.deepEqual(Object.keys(report).sort(), ['checkedAt', 'client', 'results']);
-  assert.equal(report.client, 'grid-python');
-  assert.ok(Number.isFinite(Date.parse(report.checkedAt)));
-  assert.equal(report.results.length, 1);
-  const result = report.results[0];
+function safe(report: Run, outcome: string, endpoint: 'session' | 'portfolio' = 'session') {
+  assert.deepEqual(Object.keys(report).sort(), ['balance', 'result']);
+  assert.equal(report.balance, null, 'Diagnostics and failures cannot carry asset values');
+  const result = report.result;
   assert.deepEqual(Object.keys(result).sort(), ['challenge', 'contentType', 'elapsedMs', 'endpoint', 'outcome', 'path', 'status', 'structureOk']);
-  assert.equal(result.endpoint, 'session'); assert.equal(result.path, '/api/me');
+  assert.equal(result.endpoint, endpoint); assert.equal(result.path, endpoint === 'session' ? '/api/me' : '/api/portfolio?compute_margin=true');
   assert.equal(result.outcome, outcome);
   assert.ok(Number.isFinite(result.elapsedMs) && result.elapsedMs >= 0);
   for (const secret of [credential.vrToken, privateText, 'PRIVATE_ENV_VALUE', 'PRIVATE_RESPONSE_VALUE']) {
@@ -77,7 +78,7 @@ test('Python diagnostics use the fixed isolated helper and stdin, never argv or 
     const output = JSON.stringify(success) + '\n';
     child.stdout.write(output.slice(0, 20)); child.stdout.write(output.slice(20)); child.finish();
   });
-  const report = await diagnoseVariationalPython(credential, undefined, fixture.launch);
+  const report = await single(credential, undefined, fixture.launch);
   assert.deepEqual(safe(report, 'ok'), success);
   assert.equal(fixture.calls.length, 1);
   const { command, args, options } = fixture.calls[0];
@@ -89,7 +90,7 @@ test('Python diagnostics use the fixed isolated helper and stdin, never argv or 
   assert.ok(Object.keys(options.env ?? {}).every(key => ['NODE_ENV', 'PATH', 'SystemRoot', 'WINDIR'].includes(key)));
   assert.equal(JSON.stringify(fixture.calls).includes(credential.vrToken), false);
   assert.equal(JSON.stringify(fixture.calls).includes('PRIVATE_ENV_VALUE'), false);
-  assert.deepEqual(JSON.parse(fixture.child.input), credential);
+  assert.deepEqual(JSON.parse(fixture.child.input), { ...credential, operation: 'diagnose-session' });
   assert.deepEqual(fixture.child.signals, []);
 });
 
@@ -102,7 +103,7 @@ test('Python safe response classifications survive the strict subprocess project
   ] as const) {
     const value = { ...success, outcome, status, contentType, challenge, structureOk };
     const fixture = childFixture(child => { child.stdout.write(JSON.stringify(value)); child.finish(); });
-    assert.deepEqual(safe(await diagnoseVariationalPython(credential, undefined, fixture.launch), outcome), value);
+    assert.deepEqual(safe(await single(credential, undefined, fixture.launch), outcome), value);
   }
 });
 
@@ -121,41 +122,41 @@ test('malformed, extra, secret-bearing or wrong-shape helper output is rejected'
   ];
   for (const output of bad) {
     const fixture = childFixture(child => { child.stdout.write(output); child.finish(); });
-    safe(await diagnoseVariationalPython(credential, undefined, fixture.launch), 'client_error');
+    safe(await single(credential, undefined, fixture.launch), 'client_error');
   }
 });
 
 test('nonzero helper exit cannot turn otherwise valid stdout into success', async () => {
   for (const code of [1, 2, null]) {
     const fixture = childFixture(child => { child.stdout.write(JSON.stringify(success)); child.finish(code); });
-    safe(await diagnoseVariationalPython(credential, undefined, fixture.launch), 'client_error');
+    safe(await single(credential, undefined, fixture.launch), 'client_error');
   }
 });
 
 test('helper stdout is bounded to 8192 bytes and overflow terminates the child', async () => {
   const exact = JSON.stringify(success).padEnd(8192, ' ');
   const good = childFixture(child => { child.stdout.write(exact); child.finish(); });
-  safe(await diagnoseVariationalPython(credential, undefined, good.launch), 'ok');
+  safe(await single(credential, undefined, good.launch), 'ok');
   const oversized = childFixture(child => { child.stdout.write(exact); child.stdout.write('x'); });
-  safe(await diagnoseVariationalPython(credential, undefined, oversized.launch), 'client_error');
+  safe(await single(credential, undefined, oversized.launch), 'client_error');
   assert.deepEqual(oversized.child.signals, ['SIGTERM']);
 });
 
 test('spawn errors are classified without returning executable paths or raw error messages', async () => {
   for (const code of ['ENOENT', 'EACCES']) {
     const fixture = childFixture();
-    const pending = diagnoseVariationalPython(credential, undefined, fixture.launch);
+    const pending = single(credential, undefined, fixture.launch);
     fixture.child.emit('error', Object.assign(new Error(privateText), { code }));
     fixture.child.finish(-1);
     safe(await pending, code === 'ENOENT' ? 'client_unavailable' : 'client_error');
     const launch = (() => { throw Object.assign(new Error(privateText), { code }); }) as typeof spawn;
-    safe(await diagnoseVariationalPython(credential, undefined, launch), code === 'ENOENT' ? 'client_unavailable' : 'client_error');
+    safe(await single(credential, undefined, launch), code === 'ENOENT' ? 'client_unavailable' : 'client_error');
   }
 });
 
 test('stdin failure kills the helper and returns a safe client error', async () => {
   const fixture = childFixture();
-  const pending = diagnoseVariationalPython(credential, undefined, fixture.launch);
+  const pending = single(credential, undefined, fixture.launch);
   fixture.child.stdin.emit('error', new Error(privateText));
   safe(await pending, 'client_error');
   assert.deepEqual(fixture.child.signals, ['SIGTERM']);
@@ -165,7 +166,7 @@ test('the hard deadline escalates to SIGKILL and settles only after child close'
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const fixture = childFixture(); fixture.child.autoClose = false;
   let settled = false;
-  const pending = diagnoseVariationalPython(credential, undefined, fixture.launch).then(report => { settled = true; return report; });
+  const pending = single(credential, undefined, fixture.launch).then(report => { settled = true; return report; });
   t.mock.timers.tick(22_999); await flush();
   assert.deepEqual(fixture.child.signals, []);
   t.mock.timers.tick(1); await flush();
@@ -181,7 +182,7 @@ test('caller cancellation waits for close and cannot be replaced by late stdout'
   const controller = new AbortController();
   const fixture = childFixture(); fixture.child.autoClose = false;
   let settled = false;
-  const pending = diagnoseVariationalPython(credential, controller.signal, fixture.launch).then(report => { settled = true; return report; });
+  const pending = single(credential, controller.signal, fixture.launch).then(report => { settled = true; return report; });
   controller.abort(new Error(privateText)); await flush();
   assert.deepEqual(fixture.child.signals, ['SIGTERM']); assert.equal(settled, false);
   fixture.child.stdout.write(JSON.stringify(success)); fixture.child.finish();
@@ -192,9 +193,115 @@ test('already cancelled or invalid input cannot start a Python process', async (
   let calls = 0;
   const launch = (() => { calls++; assert.fail('No subprocess should be started'); }) as typeof spawn;
   const controller = new AbortController(); controller.abort(new Error(privateText));
-  safe(await diagnoseVariationalPython(credential, controller.signal, launch), 'cancelled');
+  safe(await single(credential, controller.signal, launch), 'cancelled');
   for (const vrToken of ['', 'abc', 'a; other=secret', 'a\r\nb', 'vr-token=abcdef', 'Bearer abcdef', '令牌token', 'a'.repeat(4097)]) {
-    await assert.rejects(diagnoseVariationalPython({ vrToken }, undefined, launch), /Var /);
+    await assert.rejects(single({ vrToken }, undefined, launch), /Var /);
   }
   assert.equal(calls, 0);
+});
+
+test('portfolio diagnostics use a distinct fixed operation and never return balance', async () => {
+  const fixture = childFixture(child => { child.stdout.write(JSON.stringify(portfolioSuccess)); child.finish(); });
+  assert.deepEqual(safe(await runVariationalPython(credential, 'diagnose-portfolio', undefined, fixture.launch), 'ok', 'portfolio'), portfolioSuccess);
+  assert.deepEqual(JSON.parse(fixture.child.input), { ...credential, operation: 'diagnose-portfolio' });
+  for (const value of [success, { ...portfolioSuccess, balance: '125' }, { ...portfolioSuccess, path: '/api/me' }]) {
+    const bad = childFixture(child => { child.stdout.write(JSON.stringify(value)); child.finish(); });
+    safe(await runVariationalPython(credential, 'diagnose-portfolio', undefined, bad.launch), 'client_error', 'portfolio');
+  }
+});
+
+test('Python diagnostics start both independent requests before either finishes and keep endpoint order', async () => {
+  const children: FakeChild[] = [];
+  const launch = (() => {
+    const child = new FakeChild();
+    children.push(child);
+    return child;
+  }) as unknown as typeof spawn;
+  const pending = diagnoseVariationalPython(credential, undefined, launch);
+  assert.equal(children.length, 2, 'Both probes must start without waiting for the other response');
+  assert.deepEqual(children.map(child => JSON.parse(child.input)), [
+    { ...credential, operation: 'diagnose-session' }, { ...credential, operation: 'diagnose-portfolio' },
+  ]);
+  const challenge = { ...success, status: 403, contentType: 'html', challenge: true, structureOk: null, outcome: 'challenge' };
+  children[1].stdout.write(JSON.stringify(portfolioSuccess)); children[1].finish();
+  children[0].stdout.write(JSON.stringify(challenge)); children[0].finish();
+  const report = await pending;
+  assert.deepEqual(Object.keys(report).sort(), ['checkedAt', 'client', 'results']);
+  assert.equal(report.client, 'grid-python');
+  assert.ok(Number.isFinite(Date.parse(report.checkedAt)));
+  assert.deepEqual(report.results, [challenge, portfolioSuccess]);
+  for (const result of report.results) assert.deepEqual(Object.keys(result).sort(), ['challenge', 'contentType', 'elapsedMs', 'endpoint', 'outcome', 'path', 'status', 'structureOk']);
+  assert.equal(JSON.stringify(report).includes(credential.vrToken), false);
+});
+
+test('cancelling the comparison closes both Python children and retains two safe results', async () => {
+  const children: FakeChild[] = [];
+  const launch = (() => {
+    const child = new FakeChild(); children.push(child); return child;
+  }) as unknown as typeof spawn;
+  const controller = new AbortController();
+  const pending = diagnoseVariationalPython(credential, controller.signal, launch);
+  assert.equal(children.length, 2);
+  controller.abort(new Error(privateText));
+  const report = await pending;
+  assert.deepEqual(report.results.map(result => [result.endpoint, result.outcome]), [['session', 'cancelled'], ['portfolio', 'cancelled']]);
+  for (const child of children) { assert.equal(child.closed, true); assert.deepEqual(child.signals, ['SIGTERM']); }
+  assert.equal(JSON.stringify(report).includes(privateText), false);
+});
+
+test('the formal Python reader returns only valid balance and sends the sync operation through stdin', async () => {
+  for (const balance of [0, -50, 125, '0', '-0.000', '-50.25', '125.75']) {
+    const fixture = childFixture(child => { child.stdout.write(JSON.stringify({ ...portfolioSuccess, balance })); child.finish(); });
+    assert.equal(await readVariationalPythonBalance(credential, undefined, fixture.launch), balance);
+    assert.deepEqual(JSON.parse(fixture.child.input), { ...credential, operation: 'sync-portfolio' });
+    assert.equal(fixture.calls.length, 1);
+    assert.equal(JSON.stringify(fixture.calls).includes(credential.vrToken), false);
+  }
+});
+
+test('the formal Python reader rejects malformed balances and extra account fields without leaking them', async () => {
+  const bad = [
+    portfolioSuccess, { ...success, balance: '1' },
+    ...[null, false, '', ' ', '1e9', '123junk', 'NaN', 'Infinity', '9'.repeat(309), '0.' + '0'.repeat(400) + '1', {}, []].map(balance => ({ ...portfolioSuccess, balance })),
+    { ...portfolioSuccess, balance: '1', token: credential.vrToken },
+    { ...portfolioSuccess, balance: '1', account: 'PRIVATE_RESPONSE_VALUE' },
+  ];
+  for (const value of bad) {
+    const fixture = childFixture(child => { child.stdout.write(JSON.stringify(value)); child.finish(); });
+    await assert.rejects(readVariationalPythonBalance(credential, undefined, fixture.launch), error => {
+      assert.ok(error instanceof Error); assert.match(error.message, /^Var /);
+      assert.doesNotMatch(error.message, /PRIVATE_RESPONSE_VALUE|synthetic\.python\.input/);
+      return true;
+    });
+  }
+});
+
+test('formal Python failures retain safe HTTP and challenge diagnoses without exposing subprocess output', async () => {
+  for (const [outcome, status, contentType, challenge, expected] of [
+    ['challenge', 403, 'html', true, /Cloudflare/],
+    ['unauthorized', 401, 'json', false, /HTTP 401/],
+    ['forbidden', 403, 'json', false, /HTTP 403/],
+    ['rate_limited', 429, 'json', false, /频繁|受限/],
+    ['html', 200, 'html', false, /网页/],
+    ['timeout', null, null, false, /超时/],
+    ['network_error', null, null, false, /^Var /],
+    ['redirect', 302, 'html', false, /^Var /],
+    ['invalid_data', 200, 'json', false, /无效|不完整/],
+  ] as const) {
+    const value = { ...portfolioSuccess, outcome, status, contentType, challenge, structureOk: outcome === 'invalid_data' ? false : null, balance: null };
+    const fixture = childFixture(child => { child.stdout.write(JSON.stringify(value)); child.finish(); });
+    await assert.rejects(readVariationalPythonBalance(credential, undefined, fixture.launch), error => {
+      assert.ok(error instanceof Error); assert.match(error.message, expected); assert.match(error.message, /^Var /);
+      assert.doesNotMatch(error.message, /PRIVATE_|synthetic\.python\.input/);
+      return true;
+    });
+  }
+  for (const code of ['ENOENT', 'EACCES']) {
+    const launch = (() => { throw Object.assign(new Error(privateText), { code }); }) as typeof spawn;
+    await assert.rejects(readVariationalPythonBalance(credential, undefined, launch), error => {
+      assert.ok(error instanceof Error); assert.match(error.message, /^Var /);
+      assert.doesNotMatch(error.message, /PRIVATE_|synthetic\.python\.input/);
+      return true;
+    });
+  }
 });

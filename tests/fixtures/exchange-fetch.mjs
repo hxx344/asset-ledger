@@ -32,6 +32,10 @@ globalThis.fetch = async (input, init = {}) => {
     assert.ok(allowed, 'Diagnostics cannot contact pricing, trading or other endpoints');
   }
   if (url.hostname === 'omni.variational.io') {
+    if (!diagnosticFixture.diagnosticOnly) {
+      appendFileSync(join(process.env.ASSET_DATA_DIR, 'variational-sync-requests.jsonl'), JSON.stringify({ client: 'asset-node', path: url.pathname + url.search, operation: 'unexpected-node' }) + '\n');
+      assert.fail('Formal Variational connections and refreshes must use Python portfolio only');
+    }
     assert.ok(['https://omni.variational.io/api/me', 'https://omni.variational.io/api/portfolio?compute_margin=true'].includes(url.href));
     assert.equal(init.method, 'GET');
     assert.equal(init.redirect, 'manual');
