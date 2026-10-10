@@ -4,7 +4,10 @@ const nextConfig: NextConfig = {
   output: 'standalone',
   poweredByHeader: false,
   serverExternalPackages: ['node:sqlite'],
-  outputFileTracingIncludes: { '/*': ['./drizzle/*.sql'] },
+  outputFileTracingIncludes: {
+    '/*': ['./drizzle/*.sql'],
+    '/api/connections/variational-test': ['./scripts/variational-diagnostic.py'],
+  },
   outputFileTracingExcludes: { '/*': ['./.data/**/*', './.sites-runtime/**/*', './.wrangler/**/*', './lib/imported-ledger.json', './tests/**/*'] },
 };
 

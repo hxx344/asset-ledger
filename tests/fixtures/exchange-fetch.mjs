@@ -1,19 +1,34 @@
 // Production smoke only: injected with Node --import; never loaded by the app itself.
 import assert from 'node:assert/strict';
+import childProcess from 'node:child_process';
 import { createHmac } from 'node:crypto';
 import { verifyTypedData } from 'ethers';
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { syncBuiltinESMExports } from 'node:module';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 const flag = name => existsSync(join(process.env.ASSET_DATA_DIR, name));
 const variationalFixture = () => flag('variational-fixture.json') ? JSON.parse(readFileSync(join(process.env.ASSET_DATA_DIR, 'variational-fixture.json'), 'utf8')) : {};
 const realFetch = globalThis.fetch;
+const realSpawn = childProcess.spawn;
+const pythonFixture = fileURLToPath(new URL('./variational-python-fixture.py', import.meta.url));
+childProcess.spawn = (command, args, options) => {
+  if (!Array.isArray(args) || basename(args[2] ?? '') !== 'variational-diagnostic.py') return realSpawn(command, args, options);
+  assert.equal(command, process.platform === 'win32' ? 'python' : 'python3');
+  assert.deepEqual(args, ['-I', '-B', resolve('scripts/variational-diagnostic.py')]);
+  assert.ok(isAbsolute(args[2]) && existsSync(args[2]), 'The production runtime must include the Python helper');
+  assert.equal(options.shell, false); assert.equal(options.windowsHide, true);
+  assert.deepEqual(options.stdio, ['pipe', 'pipe', 'ignore']);
+  return realSpawn(command, ['-I', '-B', pythonFixture, args[2], join(process.env.ASSET_DATA_DIR, 'variational-fixture.json')], options);
+};
+syncBuiltinESMExports();
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input));
   const diagnosticFixture = variationalFixture();
   if (diagnosticFixture.diagnosticOnly) {
     const allowed = ['https://omni.variational.io/api/me', 'https://omni.variational.io/api/portfolio?compute_margin=true'].includes(url.href);
-    appendFileSync(join(process.env.ASSET_DATA_DIR, 'variational-diagnostic-requests.jsonl'), JSON.stringify(allowed ? url.pathname + url.search : 'unexpected-endpoint') + '\n');
+    appendFileSync(join(process.env.ASSET_DATA_DIR, 'variational-diagnostic-requests.jsonl'), JSON.stringify({ client: 'asset-node', path: allowed ? url.pathname + url.search : 'unexpected-endpoint' }) + '\n');
     assert.ok(allowed, 'Diagnostics cannot contact pricing, trading or other endpoints');
   }
   if (url.hostname === 'omni.variational.io') {

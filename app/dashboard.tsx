@@ -13,7 +13,7 @@ import { AssetTrend } from './asset-trend';
 import { WithdrawalsPanel } from './withdrawals-panel';
 import { AsterAccountsPanel } from './aster-accounts-panel';
 import { VariationalDiagnostics } from './variational-diagnostics';
-import type { VariationalDiagnosticReport } from '@/lib/variational-diagnostic-types';
+import type { VariationalDiagnosticComparisonReport } from '@/lib/variational-diagnostic-types';
 import { assetMeasures, embeddedWithdrawals, chinaDay, periodMeasures } from '@/lib/withdrawals';
 import { createHubBridge } from '@/lib/hub-bridge';
 import { requestJson, createRequestSlot } from '@/lib/client-request';
@@ -43,7 +43,7 @@ export default function Dashboard({initial}:{initial:Ledger}){
  const [editing,setEditing]=useState<Asset|null>(null),[quantity,setQuantity]=useState(''),[price,setPrice]=useState('');
  const [fxOpen,setFxOpen]=useState(false),[fx,setFx]=useState(String(initial.fx)),[formError,setFormError]=useState('');
  const [connectTo,setConnectTo]=useState<Exclude<Exchange,'aster'>|null>(null),[key,setKey]=useState(''),[secret,setSecret]=useState(''),[passphrase,setPassphrase]=useState(''),[vrToken,setVrToken]=useState(''),[region,setRegion]=useState('global');
- const [diagnosticReport,setDiagnosticReport]=useState<VariationalDiagnosticReport|null>(null),[diagnosticError,setDiagnosticError]=useState(''),[diagnosticRunning,setDiagnosticRunning]=useState(false);
+ const [diagnosticReport,setDiagnosticReport]=useState<VariationalDiagnosticComparisonReport|null>(null),[diagnosticError,setDiagnosticError]=useState(''),[diagnosticRunning,setDiagnosticRunning]=useState(false);
  const [detail,setDetail]=useState<Asset|null>(null),[period,setPeriod]=useState<Period|null>(null),[periodRows,setPeriodRows]=useState<Asset[]>([]);
  const busyRef=useRef(false),importOpenRef=useRef(false);
  const bridgeRef=useRef<ReturnType<typeof createHubBridge>|null>(null),historyRequestRef=useRef<AbortController|null>(null);
@@ -115,7 +115,7 @@ export default function Dashboard({initial}:{initial:Ledger}){
   const controller=requests.current.start();if(!controller){busyRef.current=false;setBusy(false);return;}
   diagnosticRequestRef.current=controller;setDiagnosticRunning(true);setDiagnosticReport(null);setDiagnosticError('');setFormError('');
   try{
-   const report=await requestJson<VariationalDiagnosticReport>('/api/connections/variational-test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vrToken:vrToken.trim()}),signal:controller.signal,timeoutMs:30_000});
+   const report=await requestJson<VariationalDiagnosticComparisonReport>('/api/connections/variational-test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vrToken:vrToken.trim()}),signal:controller.signal,timeoutMs:30_000});
    if(controller.signal.aborted||!mountedRef.current||diagnosticRequestRef.current!==controller)return;
    setDiagnosticReport(report);
   }
@@ -194,7 +194,7 @@ export default function Dashboard({initial}:{initial:Ledger}){
    {connectTo==='bybit'&&<label>账户地区<Select value={region} onValueChange={setRegion}><SelectTrigger aria-label="账户地区"><SelectValue/></SelectTrigger><SelectContent>{[['global','国际站'],['nl','荷兰'],['tr','土耳其'],['kz','哈萨克斯坦'],['ge','格鲁吉亚'],['ae','阿联酋'],['eu','欧洲']].map(([v,l])=><SelectItem key={v} value={v}>{l}</SelectItem>)}</SelectContent></Select></label>}
    <p className="help">{connectTo==='variational'?'vr-token 是网页会话凭据，并非只读 API Key。本账本仅通过 GET 请求读取资产；会话过期后需重新登录 Omni 并更新令牌。若提示 Cloudflare 浏览器验证，表示服务器请求被拦截，不能据此判断令牌失效。':connectTo==='okx'?'仅支持 OKX 国际站实盘 API。只开启读取权限，关闭交易与提现权限；验证账户总资产成功后保存。':connectTo==='binance'?'仅支持 Binance 国际站 HMAC API。开启读取权限，关闭交易、划转和提现等写入权限；首次验证成功后才保存连接与资产估值。':'HMAC 类型只读 API，需要账户与资产读取权限；不读取子账户及理财产品。'}</p>
    {formError&&<p className="error-text" role="alert">{formError}</p>}
-  {connectTo==='variational'&&<section className="variational-diagnostic" aria-label="Var 访问诊断"><div className="diagnostic-action"><button type="button" className="button" disabled={busy||vrToken.trim().length<5} onClick={()=>void testVariationalAccess()}>{diagnosticRunning?<><RefreshCw className="loading-spin" size={16} aria-hidden="true"/>测试中…</>:'测试访问'}</button><p className="help">从资产服务所在服务器测试两个接口；仅诊断，不保存连接，不更新资产。</p></div>{diagnosticRunning&&<p className="help" role="status">正在测试登录接口与资产接口…</p>}{diagnosticError&&<p className="error-text" role="alert">{diagnosticError}</p>}{diagnosticReport&&<VariationalDiagnostics report={diagnosticReport}/>}</section>}
+  {connectTo==='variational'&&<section className="variational-diagnostic" aria-label="Var 访问诊断"><div className="diagnostic-action"><button type="button" className="button" disabled={busy||vrToken.trim().length<5} onClick={()=>void testVariationalAccess()}>{diagnosticRunning?<><RefreshCw className="loading-spin" size={16} aria-hidden="true"/>测试中…</>:'测试访问'}</button><p className="help">从资产服务所在服务器对比两套请求方式，共三个只读 GET；不保存令牌或连接，不更新资产。</p></div>{diagnosticRunning&&<p className="help" role="status">正在测试 Asset 登录、资产接口与 Var Grid Python 登录接口…</p>}{diagnosticError&&<p className="error-text" role="alert">{diagnosticError}</p>}{diagnosticReport&&<VariationalDiagnostics report={diagnosticReport}/>}</section>}
   <div className="form-actions">{connectTo&&ledger.connections[connectTo].configured&&<button type="button" className="button" disabled={busy} onClick={()=>void mutate('/api/connections','DELETE',{exchange:connectTo},closeConnection)}>断开并保留估值</button>}<button className="button primary" disabled={busy}>{busy&&!diagnosticRunning?'验证中…':'验证并连接'}</button></div>
   </form>
  </DialogContent></Dialog>

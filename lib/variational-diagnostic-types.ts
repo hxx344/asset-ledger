@@ -1,4 +1,4 @@
-export type VariationalDiagnosticOutcome = 'ok' | 'challenge' | 'unauthorized' | 'forbidden' | 'rate_limited' | 'redirect' | 'html' | 'invalid_data' | 'timeout' | 'network_error' | 'cancelled';
+export type VariationalDiagnosticOutcome = 'ok' | 'challenge' | 'unauthorized' | 'forbidden' | 'rate_limited' | 'redirect' | 'html' | 'invalid_data' | 'timeout' | 'network_error' | 'cancelled' | 'client_unavailable' | 'client_error';
 
 export type VariationalDiagnosticResult = {
   endpoint: 'session' | 'portfolio';
@@ -13,6 +13,11 @@ export type VariationalDiagnosticResult = {
 
 export type VariationalDiagnosticReport = {
   checkedAt: string;
-  client: 'asset-node';
+  client: 'asset-node' | 'grid-python';
   results: VariationalDiagnosticResult[];
+};
+
+export type VariationalDiagnosticComparisonReport = {
+  checkedAt: string;
+  clients: VariationalDiagnosticReport[];
 };

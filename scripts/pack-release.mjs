@@ -29,6 +29,7 @@ async function copy(name, destination = name) {
   await cp(source, join(stage, destination), { recursive: true, dereference: true, filter: path => path.split(sep).at(-1) !== '.bin' && path !== join(root, '.next/standalone/.next/cache') });
 }
 try {
+  if (!(await stat(join(root, '.next/standalone/scripts/variational-diagnostic.py'))).isFile()) throw new Error('Missing Python diagnostic helper in standalone runtime');
   for (const name of ['.next/standalone', '.next/BUILD_ID', 'scripts/configure.mjs', 'scripts/backup.mjs', 'scripts/import-workbook.py']) await copy(name);
   await copy('.next/static', '.next/standalone/.next/static');
   await copy('public', '.next/standalone/public');

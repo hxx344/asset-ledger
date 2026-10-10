@@ -137,10 +137,13 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,te
 .diagnostic-action{display:flex;align-items:flex-start;gap:12px}
 .diagnostic-action>.button{flex-shrink:0}
 .diagnostic-results{display:grid;gap:12px;min-width:0}
+.diagnostic-client{display:grid;gap:10px;min-width:0}
+.diagnostic-client+.diagnostic-client{margin-top:6px}
+.diagnostic-client-title{margin:0;font-size:.875rem;font-weight:600}
 .diagnostic-endpoints{display:grid;gap:12px}
 .diagnostic-endpoint{border:1px solid var(--border);border-radius:8px;padding:14px;min-width:0;font-size:.8125rem}
 .diagnostic-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
-.diagnostic-heading h3{margin:0;font-size:.875rem;font-weight:600}
+.diagnostic-heading h4{margin:0;font-size:.8125rem;font-weight:600}
 .diagnostic-path{display:block;margin-top:8px;color:var(--muted-foreground);font-size:.75rem;overflow-wrap:anywhere}
 .diagnostic-endpoint>p{margin-top:10px;line-height:1.6}
 .diagnostic-outcome{color:#9a6718}
