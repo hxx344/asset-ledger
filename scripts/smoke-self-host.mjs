@@ -57,6 +57,7 @@ try {
   assert.equal((await request('/')).status, 307);
   assert.equal((await request('/api/ledger', 'GET', undefined, { 'oai-authenticated-user-id': 'owner', 'oai-authenticated-user-email': 'spoof@example.test' })).status, 401);
   assert.equal((await request('/api/hub/summary?schemaVersion=2')).status, 401);
+  assert.equal((await request('/api/hub/positions')).status, 401);
   assert.equal((await request('/api/import', 'POST', {})).status, 401);
   for(const exchange of ['binance','okx'])for(const method of ['POST','DELETE'])assert.equal((await request('/api/connections',method,{exchange})).status,401);
   assert.equal((await request('/api/withdrawals', 'POST', {})).status, 401);
@@ -80,6 +81,14 @@ try {
   assert.equal(summary.data.metrics.find(metric => metric.key === 'ledger_total').value, ledger.assets.reduce((sum, asset) => sum + (asset.value ?? 0), 0));
   assert.equal('assets' in summary.data, false);
   assert.equal((await request('/api/hub/summary?schemaVersion=3')).status, 400);
+  const positionsResponse = await request('/api/hub/positions');
+  assert.equal(positionsResponse.status, 200);
+  assert.equal(positionsResponse.headers.get('cache-control'), 'no-store');
+  const positions = await positionsResponse.json();
+  assert.equal(positions.schemaVersion, 1);
+  assert.deepEqual(positions.exchanges.map(exchange => exchange.id).sort(), ['aster', 'binance', 'bybit', 'okx', 'variational']);
+  assert.ok(positions.exchanges.every(exchange => exchange.accounts.every(account => !account.configured && account.revision === null && account.scopes.every(scope => scope.status === 'unconfigured' && scope.positions.length === 0))));
+  assert.equal((await request('/api/hub/positions?schemaVersion=2')).status, 400);
   assert.equal((await request('/')).status, 200);
   assert.equal((await request('/api/ledger', 'PATCH', { id: 'row-5', quantity: 789, price: 1 })).status, 200);
   assert.equal((await request('/api/ledger', 'PATCH', { fx: 7.2 }, { origin: 'https://untrusted.example' })).status, 403);

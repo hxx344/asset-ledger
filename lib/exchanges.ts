@@ -163,6 +163,9 @@ type AsterReadPath=keyof typeof ASTER_READ_HOSTS;
 const ASTER_DOMAIN={name:'AsterSignTransaction',version:'1',chainId:1666,verifyingContract:'0x0000000000000000000000000000000000000000'};
 const ASTER_TYPES={Message:[{name:'msg',type:'string'}]};
 let lastAsterNonce=0;
+// Balance and position readers share one nonce allocator so concurrent reads of
+// the same API Pro wallet cannot reuse the same microsecond timestamp.
+export function nextAsterNonce(){lastAsterNonce=Math.max(Date.now()*1000,lastAsterNonce+1);return String(lastAsterNonce);}
 export function validateAsterWallet(c:AsterCredential):Wallet{
   if(!c.walletAddress||!c.privateKey)throw new Error('Aster 连接需要更新：请填写 API Pro 钱包地址和对应私钥；已保留旧估值');
   let wallet:Wallet;
@@ -175,8 +178,7 @@ export async function asterGet(c:AsterCredential,path:AsterReadPath,fetcher:Fetc
   if(!Object.hasOwn(ASTER_READ_HOSTS,path))throw new Error('仅支持 Aster 只读余额接口');
   const wallet=validateAsterWallet(c);
   // Sign precisely the encoded query sent to Aster. Private keys never leave this server.
-  lastAsterNonce=Math.max(Date.now()*1000,lastAsterNonce+1);
-  const query=new URLSearchParams({nonce:String(lastAsterNonce),signer:wallet.address}).toString();
+  const query=new URLSearchParams({nonce:nextAsterNonce(),signer:wallet.address}).toString();
   let signature:string;
   try{signature=await wallet.signTypedData(ASTER_DOMAIN,ASTER_TYPES,{msg:query});}
   catch{throw new Error('API 钱包签名失败，请检查钱包配置');}

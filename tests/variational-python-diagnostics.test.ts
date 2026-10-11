@@ -5,7 +5,7 @@ import { PassThrough } from 'node:stream';
 import type { spawn, SpawnOptions } from 'node:child_process';
 import { isAbsolute, basename } from 'node:path';
 import { diagnoseVariationalPython } from '../lib/variational-python-diagnostics.ts';
-import { readVariationalPythonBalance, runVariationalPython } from '../lib/variational-python-client.ts';
+import { readVariationalPythonBalance, readVariationalPythonPositions, runVariationalPython } from '../lib/variational-python-client.ts';
 
 const credential = { vrToken: 'synthetic.python.input' };
 const privateText = 'PRIVATE_HELPER_TEXT ' + credential.vrToken;
@@ -69,6 +69,28 @@ function safe(report: Run, outcome: string, endpoint: 'session' | 'portfolio' = 
 }
 
 const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+
+test('Python positions use the fixed independent operation and reject unvalidated or leaking subprocess fields', async () => {
+  const item = { id: 'a'.repeat(64), symbol: 'BTC', instrumentId: 'b'.repeat(64), side: 'long', quantity: '1.000000000000000001',
+    quantityUnit: 'BTC', contractSize: '1', entryPrice: '90000', markPrice: '91000', notional: '91000', unrealizedPnl: '-0.1',
+    leverage: null, liquidationPrice: null, priceCurrency: 'USDC', notionalCurrency: 'USDC', pnlCurrency: 'USDC', marginMode: null, sourceUpdatedAt: null };
+  const response = { ...portfolioSuccess, path: '/api/positions', positions: [item] };
+  const fixture = childFixture(child => { child.stdout.write(JSON.stringify(response)); child.finish(); });
+  assert.deepEqual(await readVariationalPythonPositions(credential, undefined, fixture.launch), [item]);
+  assert.deepEqual(JSON.parse(fixture.child.input), { vrToken: credential.vrToken, operation: 'sync-positions' });
+  assert.ok(!JSON.stringify(fixture.calls).includes(credential.vrToken));
+  for (const bad of [
+    { ...response, path: '/api/portfolio?compute_margin=true' }, { ...response, positions: null },
+    { ...response, positions: [item, item] }, { ...response, positions: [{ ...item, quantity: '0' }] },
+    { ...response, positions: [{ ...item, quantity: 1 }] }, { ...response, positions: [{ ...item, token: credential.vrToken }] },
+    { ...response, outcome: 'invalid_data', structureOk: false },
+  ]) {
+    const failing = childFixture(child => { child.stdout.write(JSON.stringify(bad)); child.finish(); });
+    await assert.rejects(readVariationalPythonPositions(credential, undefined, failing.launch), error => error instanceof Error && !error.message.includes(credential.vrToken));
+  }
+  const empty = childFixture(child => { child.stdout.write(JSON.stringify({ ...response, positions: [] })); child.finish(); });
+  assert.deepEqual(await readVariationalPythonPositions(credential, undefined, empty.launch), []);
+});
 
 test('Python diagnostics use the fixed isolated helper and stdin, never argv or inherited app secrets', async t => {
   const saved = process.env.ASSET_PYTHON_TEST_SECRET;

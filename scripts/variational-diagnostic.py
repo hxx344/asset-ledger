@@ -3,6 +3,8 @@
 The only credential input is stdin. Never print upstream bodies or exception text.
 """
 import json
+import hashlib
+from datetime import datetime, timezone
 import math
 import re
 import socket
@@ -15,6 +17,7 @@ TARGETS = {
     "diagnose-session": ("session", "/api/me"),
     "diagnose-portfolio": ("portfolio", "/api/portfolio?compute_margin=true"),
     "sync-portfolio": ("portfolio", "/api/portfolio?compute_margin=true"),
+    "sync-positions": ("portfolio", "/api/positions"),
 }
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36"
 MAX_BYTES = 2 * 1024 * 1024
@@ -53,6 +56,70 @@ def valid_balance(value):
         return False
 
 
+def position_decimal(value, optional=False):
+    if optional and value in (None, ""):
+        return None
+    if not isinstance(value, str) or len(value) > 128 or re.fullmatch(r"-?[0-9]+(?:\.[0-9]+)?", value) is None:
+        raise ValueError("Invalid position")
+    return value
+
+
+def position_text(value):
+    if not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9_.:/ -]{1,128}", value) is None:
+        raise ValueError("Invalid position")
+    return value
+
+
+def normalize_positions(data):
+    # The current Omni frontend reads GET /api/positions as an array. It uses
+    # position_info, price_info.price, value, upnl and estimated_liquidation_price.
+    # Unknown shapes (including paginated objects) fail, never imply flat holdings.
+    source = data
+    if not isinstance(source, list) or len(source) > 1000:
+        raise ValueError("Invalid position")
+    result, ids = [], set()
+    for row in source:
+        if not isinstance(row, dict) or not isinstance(row.get("position_info"), dict):
+            raise ValueError("Invalid position")
+        info = row["position_info"]
+        quantity = position_decimal(info.get("qty"))
+        if not re.search(r"[1-9]", quantity):
+            continue
+        instrument = info.get("instrument")
+        if not isinstance(instrument, dict) or instrument.get("instrument_type") not in ("perpetual_future", "perpetual_rwa_future", "perpetual_cfd", "swap"):
+            raise ValueError("Invalid position")
+        underlying = position_text(instrument.get("underlying"))
+        currency = position_text(instrument.get("settlement_asset"))
+        instrument_id = hashlib.sha256(json.dumps(instrument, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        identity = [instrument, info.get("pool_location"), info.get("counterparty"), info.get("company")]
+        position_id = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        if position_id in ids:
+            raise ValueError("Invalid position")
+        ids.add(position_id)
+        price_info = row.get("price_info")
+        if price_info is not None and not isinstance(price_info, dict):
+            raise ValueError("Invalid position")
+        updated = info.get("updated_at")
+        if updated is not None:
+            if not isinstance(updated, str):
+                raise ValueError("Invalid position")
+            parsed = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+            if parsed.tzinfo is None or parsed.timestamp() <= 0 or parsed.timestamp() > time.time() + 60:
+                raise ValueError("Invalid position")
+            updated = parsed.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        result.append({"id": position_id, "symbol": underlying, "instrumentId": instrument_id,
+                       "side": "short" if quantity.startswith("-") else "long", "quantity": quantity.lstrip("-"),
+                       "quantityUnit": underlying, "contractSize": "1",
+                       "entryPrice": position_decimal(info.get("avg_entry_price"), True),
+                       "markPrice": position_decimal((price_info or {}).get("price"), True),
+                       "notional": position_decimal(row.get("value"), True).lstrip("-") if row.get("value") not in (None, "") else None,
+                       "unrealizedPnl": position_decimal(row.get("upnl"), True),
+                       "leverage": None, "liquidationPrice": position_decimal(row.get("estimated_liquidation_price"), True),
+                       "priceCurrency": currency, "notionalCurrency": currency, "pnlCurrency": currency,
+                       "marginMode": None, "sourceUpdatedAt": updated})
+    return result
+
+
 def probe(token, opener=None, operation="diagnose-session"):
     if not valid_token(token) or not isinstance(operation, str) or operation not in TARGETS:
         raise ValueError("Invalid diagnostic input")
@@ -63,6 +130,8 @@ def probe(token, opener=None, operation="diagnose-session"):
               "structureOk": None, "outcome": "network_error"}
     if operation == "sync-portfolio":
         result["balance"] = None
+    if operation == "sync-positions":
+        result["positions"] = None
     response = None
     try:
         # Match Grid's Client.request login path, including its three headers.
@@ -102,6 +171,9 @@ def probe(token, opener=None, operation="diagnose-session"):
                 returned_token = data.get("token") if isinstance(data, dict) else None
                 # Attest only to structure, never to authentication or token validity.
                 result["structureOk"] = isinstance(returned_token, str) and 0 < len(returned_token) <= 32768
+            elif operation == "sync-positions":
+                result["positions"] = normalize_positions(data)
+                result["structureOk"] = True
             else:
                 balance = data.get("balance") if isinstance(data, dict) else None
                 result["structureOk"] = bool(valid_balance(balance))
