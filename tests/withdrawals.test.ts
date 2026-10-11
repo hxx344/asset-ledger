@@ -1,11 +1,69 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assetMeasures, assetTrend, embeddedWithdrawals, chinaDay, periodMeasures } from '../lib/withdrawals.ts';
+import { assetMeasures, assetDisplayRows, assetTrend, embeddedWithdrawals, chinaDay, periodMeasures } from '../lib/withdrawals.ts';
 import { withdrawalSchema } from '../lib/validation.ts';
-import type { Period, Withdrawal } from '../lib/types.ts';
+import type { Asset, Period, Withdrawal } from '../lib/types.ts';
 
 const withdrawal = (date: string, amount: number): Withdrawal => ({ id: crypto.randomUUID(), date, amount, note: '', createdAt: date, updatedAt: date });
 const period = (id: string, date: string, total: number, withdrawn = 0): Period => ({ id, date, total, withdrawn, fx: 7, cny: total * 7, difference: 0, future: false });
+const asset = (id: string, project: string, quantity: number | null, price: number | null = 1): Asset => ({
+  id, project, quantity, price, value: quantity === null || price === null ? null : quantity * price,
+  kind: '资产', mode: 'manual', cell: 'E2', updatedAt: '2026-09-14T00:00:00+08:00', status: '手动估值',
+});
+
+test('current details and total include recorded withdrawals once through add, edit, delete and refresh', () => {
+  const assets = [asset('row-1', '持仓', 1000), asset('row-2', ' 出金 ', 200), asset('row-3', '出金', 50)];
+  const original = structuredClone(assets);
+  const records = [withdrawal('2026-09-18', 100.25), withdrawal('2026-09-20', 500)];
+  const check = (expected: number) => {
+    const rows = assetDisplayRows(assets, records, '2026-09-19');
+    const measures = assetMeasures(1250, 250, records, '2026-09-19');
+    assert.equal(rows[0].value, 1000);
+    assert.equal(rows[1].quantity, 200 + expected);
+    assert.equal(rows[1].value, 200 + expected);
+    assert.equal(rows[2].value, 50);
+    assert.equal(rows.reduce((sum, row) => sum + (row.value ?? 0), 0), measures.adjusted);
+    assert.equal(embeddedWithdrawals(rows), measures.withdrawn);
+    assert.equal(measures.held, 1000);
+    assert.equal(measures.adjusted, 1250 + expected);
+    assert.deepEqual(assets, original, 'display values must never be persisted or passed to the original row editor');
+    return rows;
+  };
+  assert.deepEqual(check(100.25), check(100.25), 'refresh starts from unchanged stored rows');
+  records[0].amount = 90.5;
+  check(90.5);
+  records.shift();
+  check(0);
+});
+
+test('USD records use a separate row when original withdrawal quantities have another unit or lack a value', () => {
+  for (const assets of [
+    [asset('row-1', '持仓', 1000)],
+    [asset('row-1', '出金', 20, 7)],
+    [asset('row-1', '出金', null)],
+    [{ ...asset('row-1', '出金', 20), value: 25 }],
+  ]) {
+    const copy = structuredClone(assets);
+    const records = [withdrawal('2026-09-18', 100.25), withdrawal('2026-09-20', 500)];
+    const rows = assetDisplayRows(assets, records, '2026-09-19');
+    assert.equal(rows.length, assets.length + 1);
+    assert.deepEqual(rows.slice(0, -1), assets);
+    assert.equal(rows.at(-1)?.id, 'recorded-withdrawals');
+    assert.equal(rows.at(-1)?.quantity, 100.25);
+    assert.equal(rows.at(-1)?.price, 1);
+    assert.equal(rows.at(-1)?.value, 100.25);
+    assert.equal(rows.at(-1)?.updatedAt, records[0].updatedAt);
+    assert.deepEqual(assets, copy);
+    assert.deepEqual(assetDisplayRows(assets, [], '2026-09-19'), assets);
+  }
+});
+
+test('only the first compatible manual withdrawal row receives recorded USD', () => {
+  const assets = [asset('row-1', '出金', 20, 7), asset('row-2', '出金', 200), asset('row-3', '出金', 50)];
+  const rows = assetDisplayRows(assets, [withdrawal('2026-09-18', 100)], '2026-09-19');
+  assert.deepEqual(rows.map(row => row.quantity), [20, 300, 50]);
+  assert.deepEqual(rows.map(row => row.value), [140, 300, 50]);
+});
 
 test('workbook cumulative withdrawals are removed from holdings and added back exactly once', () => {
   const embedded = embeddedWithdrawals([{ project: '出金', value: 2000 }, { project: '出借', value: 500 }, { project: '其他', value: 1000 }]);

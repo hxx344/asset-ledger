@@ -57,6 +57,56 @@ test('summary preserves ledger totals, withdrawals, oldest dynamic time and CNY/
   assert.equal(metrics.fx.unit, 'CNY/USD');
 });
 
+test('recorded withdrawals update ledger totals through the Beijing day without changing holdings or source rows', () => {
+  const source = {
+    ...input(),
+    assets: [asset('market', fresh, 300), { ...asset('manual', fresh, 25), project: ' 出金 ' }],
+    withdrawals: [{ date: '2026-09-22', amount: 10 }, { date: '2026-09-23', amount: 20 }, { date: '2026-09-24', amount: 900 }],
+  };
+  const original = structuredClone(source);
+  const result = buildHubSummary(source, now).data;
+  const metrics = Object.fromEntries(result.metrics.map(metric => [metric.key, metric]));
+  assert.equal(metrics.ledger_total.value, 355);
+  assert.equal(metrics.holdings.value, 300);
+  assert.equal(metrics.entries.value, 2);
+  assert.match(metrics.ledger_total.detail!, /原表出金.*新增出金/);
+  assert.deepEqual(source, original);
+});
+
+test('trend adds recorded withdrawals by date after the original baseline and on daily baseline snapshots', () => {
+  const source = {
+    ...input(), baselineDate: '2026-09-22',
+    withdrawals: [{ date: '2026-09-22', amount: 10 }, { date: '2026-09-23', amount: 20 }, { date: '2026-09-24', amount: 900 }],
+    history: [
+      { id: 'original-before', date: '2026-09-21', total: 100 },
+      { id: 'original-baseline', date: '2026-09-22', total: 200 },
+      { id: 'original-after', date: '2026-09-23', total: 300 },
+      { id: 'original-future', date: '2026-09-24', total: 400 },
+    ],
+  };
+  const original = structuredClone(source);
+  assert.deepEqual(buildHubSummary(source, now).data.trend, [
+    { at: '2026-09-21T00:00:00+08:00', value: 100 },
+    { at: '2026-09-22T00:00:00+08:00', value: 200 },
+    { at: '2026-09-23T00:00:00+08:00', value: 330 },
+  ]);
+  const daily = buildHubSummary({ ...source, history: [...source.history, { id: 'daily-2026-09-22', date: '2026-09-22', total: 250 }] }, now).data;
+  assert.equal(daily.trend.find(point => point.at.startsWith('2026-09-22'))?.value, 260);
+  assert.deepEqual(source, original);
+});
+
+test('recorded withdrawals preserve unknown valuations and partial health', () => {
+  const result = buildHubSummary({
+    ...input(), assets: [asset('market', fresh, 100), { ...asset('manual', fresh, null), project: '出金' }],
+    withdrawals: [{ date: '2026-09-23', amount: 40 }],
+    history: [{ id: 'daily-2026-09-23', date: '2026-09-23', total: null }],
+  }, now).data;
+  assert.equal(result.metrics.find(metric => metric.key === 'ledger_total')?.value, null);
+  assert.equal(result.metrics.find(metric => metric.key === 'holdings')?.value, null);
+  assert.equal(result.health.state, 'partial');
+  assert.deepEqual(result.trend, []);
+});
+
 test('only explicit manual valuations are static; missing dynamic sources and FX errors stay visible', () => {
   const manual = buildHubSummary({ ...input(), assets: [asset('manual', '2020-01-01T00:00:00Z')] }, now).data;
   assert.equal(manual.freshness, 'static');
@@ -114,5 +164,52 @@ test('summary reads owner-scoped projected totals and finds 90 valid days beyond
     assert.deepEqual(result.data.trend.at(-1), { at: '2026-09-23T00:00:00+08:00', value: 99 });
     assert.equal(result.data.trend.find(point => point.at.startsWith('2026-09-22'))?.value, 98);
     assert.equal(JSON.stringify(result).includes('privateHistoryMarker'), false);
+  } finally { database.close(); }
+});
+
+test('owner-scoped recorded withdrawal additions, edits and deletions recalculate current and historical totals without rewriting snapshots', async () => {
+  const database = openDatabase(':memory:');
+  try {
+    const rows = [asset('market', fresh, 300), { ...asset('manual', fresh, 25), project: '出金' }];
+    for (const [index, row] of rows.entries()) {
+      await database.prepare('INSERT INTO assets VALUES(?,?,?)').bind('owner', 'row-' + index, JSON.stringify(row)).run();
+    }
+    const source = JSON.stringify({ source: 'personal', baselineDate: '2026-09-21', periods: [
+      { id: 'baseline', date: '2026-09-21', total: 300, rows: [{ privateHistoryMarker: 'not-in-summary' }] },
+      { id: 'original-after', date: '2026-09-22', total: 310 },
+    ] });
+    const snapshot = JSON.stringify({ id: 'daily-2026-09-23', date: '2026-09-23', total: 325, assets: rows });
+    for (const [key, value] of Object.entries({ fx: '7', 'fx-status': JSON.stringify({ fetchedAt: fresh }), 'source-ledger': source })) {
+      await database.prepare('INSERT INTO settings VALUES(?,?,?)').bind('owner', key, value).run();
+    }
+    await database.prepare('INSERT INTO snapshots VALUES(?,?,?)').bind('owner', '2026-09-23', snapshot).run();
+    await database.prepare('INSERT INTO settings VALUES(?,?,?)').bind('other', 'withdrawals', JSON.stringify([{ date: '2026-09-21', amount: 999999 }])).run();
+    await database.prepare('INSERT INTO settings VALUES(?,?,?)').bind('other', 'source-ledger', JSON.stringify({ baselineDate: '2000-01-01', periods: [{ id: 'other', date: '2026-09-22', total: 999999 }] })).run();
+
+    const check = async (current: number, history: number[]) => {
+      const result = await readHubSummary(database, 'owner', now);
+      assert.equal(result.data.metrics.find(metric => metric.key === 'ledger_total')?.value, current);
+      assert.equal(result.data.metrics.find(metric => metric.key === 'holdings')?.value, 300);
+      assert.deepEqual(result.data.trend.map(point => point.value), history);
+      assert.doesNotMatch(JSON.stringify(result), /privateHistoryMarker|privateWithdrawalMarker/);
+    };
+    await check(325, [300, 310, 325]);
+    const baseline = { id: 'baseline-withdrawal', date: '2026-09-21', amount: 5, note: 'privateWithdrawalMarker' };
+    const recorded = { id: 'recorded', date: '2026-09-22', amount: 10, note: 'privateWithdrawalMarker' };
+    const today = { id: 'today', date: '2026-09-23', amount: 20, note: 'privateWithdrawalMarker' };
+    const future = { id: 'future', date: '2026-09-24', amount: 900, note: 'privateWithdrawalMarker' };
+    const save = async (withdrawals: typeof recorded[]) => database.prepare('INSERT INTO settings VALUES(?,?,?) ON CONFLICT(owner,key) DO UPDATE SET value=excluded.value').bind('owner', 'withdrawals', JSON.stringify(withdrawals)).run();
+    await save([baseline, recorded, today, future]);
+    await check(360, [300, 325, 360]);
+    await save([baseline, { ...recorded, amount: 30 }, today, future]);
+    await check(380, [300, 345, 380]);
+    await save([baseline, today, future]);
+    await check(350, [300, 315, 350]);
+    await save([]);
+    await check(325, [300, 310, 325]);
+    assert.equal((await database.prepare("SELECT value FROM settings WHERE owner = ? AND key = 'source-ledger'").bind('owner').first<{ value: string }>())?.value, source);
+    assert.equal((await database.prepare('SELECT data FROM snapshots WHERE owner = ? AND date = ?').bind('owner', '2026-09-23').first<{ data: string }>())?.data, snapshot);
+    const persistedAssets = await database.prepare('SELECT data FROM assets WHERE owner = ? ORDER BY id').bind('owner').all<{ data: string }>();
+    assert.deepEqual(persistedAssets.results.map(row => JSON.parse(row.data)), rows);
   } finally { database.close(); }
 });
