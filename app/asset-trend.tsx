@@ -1,5 +1,5 @@
 'use client';
-import { useMemo } from 'react';
+import { memo, useMemo } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { assetTrend } from '@/lib/withdrawals';
 import type { Ledger } from '@/lib/types';
@@ -7,7 +7,7 @@ import type { Ledger } from '@/lib/types';
 const money = (value: number) => value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const signed = (value: number) => (value > 0 ? '+' : '') + money(value);
 
-export function AssetTrend({ ledger, today, onHistory }: { ledger: Ledger; today: string; onHistory: () => void }) {
+export const AssetTrend = memo(function AssetTrend({ ledger, today, onHistory }: { ledger: Ledger; today: string; onHistory: () => void }) {
   const history = useMemo(() => assetTrend(ledger, today), [ledger, today]);
   const first = history[0], last = history.at(-1);
   const change = first && last ? last.adjusted - first.adjusted : null;
@@ -33,4 +33,4 @@ export function AssetTrend({ ledger, today, onHistory }: { ledger: Ledger; today
     </div> : <div className="empty-state">刷新资产后生成第一条日快照</div>}
     <p className="chart-note">调整后资产 = 实际持有资产 + 累计出金；仅计已登记出金，入金未剔除。连线仅连接已有记录，不代表缺失日期的估值。{history.some(point => point.partial) && <strong> 含旧值快照，详见历史记录。</strong>}<button className="text-button" onClick={onHistory}>查看记录</button></p>
   </section>;
-}
+});
